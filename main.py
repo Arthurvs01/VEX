@@ -65,6 +65,7 @@ class GestorDelivery(ctk.CTk):
         self.tam_endereco = 2  # Índice 2 = Médio (10pt)
         self.tam_itens = 2     # Índice 2 = Médio (9pt)
         self.tam_valores = 2   # Índice 2 = Médio (9pt)
+        self.salvar_pdf_comandas = True
 
         self.editando_id_pedido = None
         self.title("VEX - Gestor de Comandas")
@@ -109,6 +110,7 @@ class GestorDelivery(ctk.CTk):
                 elif chave == 'tam_endereco': self.tam_endereco = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_itens': self.tam_itens = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
+                elif chave == 'salvar_pdf_comandas': self.salvar_pdf_comandas = valor == "True"
                 elif chave == 'logo_path':
                     if os.path.exists(valor): self.logo_path = valor
             
@@ -1478,10 +1480,13 @@ class GestorDelivery(ctk.CTk):
         
         # Dados do Cliente
         data_hora_arq = datetime.now().strftime("%d-%m-%Y - %H-%M-%S")
-        nome_arquivo = f"Comandas/{data_hora_arq} - {label_tipo} N° {num_dia}.pdf"
         data_formatada = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-        if not os.path.exists("Comandas"): os.makedirs("Comandas")
+        if self.salvar_pdf_comandas:
+            if not os.path.exists("Comandas"): os.makedirs("Comandas")
+            nome_arquivo = f"Comandas/{data_hora_arq} - {label_tipo} N° {num_dia}.pdf"
+        else:
+            nome_arquivo = os.path.join(tempfile.gettempdir(), f"vex_temp_{id_pedido}.pdf")
         
         # Geração do PDF
         c = canvas.Canvas(nome_arquivo, pagesize=(largura, altura))
@@ -1659,6 +1664,10 @@ class GestorDelivery(ctk.CTk):
         self.sw_abrir_pdf.grid(row=1, column=0, padx=15, pady=15, sticky="w")
         if self.abrir_pdf: self.sw_abrir_pdf.select()
 
+        self.sw_salvar_pdf = ctk.CTkSwitch(frame_pref, text="Salvar histórico de pedidos (PDF) na pasta 'Comandas'")
+        self.sw_salvar_pdf.grid(row=2, column=0, padx=15, pady=15, sticky="w")
+        if self.salvar_pdf_comandas: self.sw_salvar_pdf.select()
+
         # Botão Salvar Geral
         btn_salvar_tudo = ctk.CTkButton(self.container, text="💾 SALVAR TODAS AS CONFIGURAÇÕES", 
                                         fg_color=Theme.SUCCESS, hover_color="#219150", 
@@ -1755,7 +1764,8 @@ class GestorDelivery(ctk.CTk):
                 'tam_cabecalho': str(self.tam_cabecalho),
                 'tam_endereco': str(self.tam_endereco),
                 'tam_itens': str(self.tam_itens),
-                'tam_valores': str(self.tam_valores)
+                'tam_valores': str(self.tam_valores),
+                'salvar_pdf_comandas': str(self.sw_salvar_pdf.get() == 1)
             }
             
             for chave, valor in configs.items():
@@ -1770,6 +1780,7 @@ class GestorDelivery(ctk.CTk):
             self.num_vias = int(configs['num_vias']) if configs['num_vias'].isdigit() else 1
             self.abrir_pdf = configs['abrir_pdf'] == "True"
             self.impressora_selecionada = None if configs['impressora_selecionada'] == "Nenhuma" else configs['impressora_selecionada']
+            self.salvar_pdf_comandas = configs['salvar_pdf_comandas'] == "True"
 
             messagebox.showinfo("Sucesso", "Configurações aplicadas!")
         except Exception as e:
