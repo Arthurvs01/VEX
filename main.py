@@ -59,8 +59,15 @@ class GestorDelivery(ctk.CTk):
         self.num_vias = 1
         self.abrir_pdf = False
 
+        # Configurações de Impressão Avançadas
+        self.largura_papel = 80
+        self.tam_cabecalho = 2 # Índice 2 = Médio (14pt)
+        self.tam_endereco = 2  # Índice 2 = Médio (10pt)
+        self.tam_itens = 2     # Índice 2 = Médio (9pt)
+        self.tam_valores = 2   # Índice 2 = Médio (9pt)
+
         self.editando_id_pedido = None
-        self.title("Sistema de Delivery - Fluxo Rápido")
+        self.title("VEX - Gestor de Comandas")
 
         # Configuração de Janela: Centralizar e Iniciar Maximizada
         largura_tela = self.winfo_screenwidth()
@@ -97,6 +104,11 @@ class GestorDelivery(ctk.CTk):
                 elif chave == 'end_empresa': self.end_empresa = valor
                 elif chave == 'num_vias': self.num_vias = int(valor) if valor.isdigit() else 1
                 elif chave == 'abrir_pdf': self.abrir_pdf = valor == "True"
+                elif chave == 'largura_papel': self.largura_papel = int(valor) if valor.isdigit() else 80
+                elif chave == 'tam_cabecalho': self.tam_cabecalho = int(valor) if valor.isdigit() else 2
+                elif chave == 'tam_endereco': self.tam_endereco = int(valor) if valor.isdigit() else 2
+                elif chave == 'tam_itens': self.tam_itens = int(valor) if valor.isdigit() else 2
+                elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
                 elif chave == 'logo_path':
                     if os.path.exists(valor): self.logo_path = valor
             
@@ -570,11 +582,44 @@ class GestorDelivery(ctk.CTk):
         self.list_sugestao = tk.Listbox(self.frame_sugestao, font=("Arial", 11), borderwidth=0, highlightthickness=0)
         self.list_sugestao.pack(fill="both", expand=True)
 
+        # --- BOTÕES DE AÇÃO E FILTRO ---
+        self.frame_acoes_prod = ctk.CTkFrame(self.container, fg_color="transparent")
+        self.frame_acoes_prod.pack(pady=10, padx=20, fill="x")
+
+        self.btn_salvar_prod = ctk.CTkButton(self.frame_acoes_prod, text="SALVAR (F2)", fg_color="#27ae60", height=35, command=self.salvar_produto_db)
+        self.btn_salvar_prod.pack(side="left", padx=5)
+
+        self.btn_limpar_prod = ctk.CTkButton(self.frame_acoes_prod, text="LIMPAR (F3)", fg_color="gray", height=35, command=self.limpar_campos_cardapio)
+        self.btn_limpar_prod.pack(side="left", padx=5)
+
+        self.btn_excluir_prod = ctk.CTkButton(self.frame_acoes_prod, text="EXCLUIR (DEL)", fg_color="#e74c3c", height=35, command=self.excluir_produto_db)
+        self.btn_excluir_prod.pack(side="right", padx=5)
+
+        ctk.CTkLabel(self.frame_acoes_prod, text="🔍 Filtrar:", font=Theme.FONT_LABEL).pack(side="right", padx=5)
+        self.cb_filtro_cat = ctk.CTkComboBox(self.frame_acoes_prod, values=["TODOS"], command=lambda _: self.atualizar_lista_produtos())
+        self.cb_filtro_cat.pack(side="right", padx=5)
+        self.cb_filtro_cat.set("TODOS")
+
+        # --- TABELA DE PRODUTOS ---
+        self.tree_prod = ttk.Treeview(self.container, columns=("ID", "Produto", "Categoria", "Preço"), show="headings")
+        self.tree_prod.heading("ID", text="ID")
+        self.tree_prod.heading("Produto", text="Nome do Produto")
+        self.tree_prod.heading("Categoria", text="Categoria")
+        self.tree_prod.heading("Preço", text="Preço (R$)")
+        self.tree_prod.column("ID", width=80, anchor="center")
+        self.tree_prod.column("Produto", width=300, anchor="w")
+        self.tree_prod.column("Categoria", width=150, anchor="center")
+        self.tree_prod.column("Preço", width=100, anchor="center")
+        self.tree_prod.pack(pady=10, padx=20, fill="both", expand=True)
+        self.tree_prod.bind("<<TreeviewSelect>>", self.preencher_campos_cardapio)
+
         # Adicionar campo Categoria na tabela de produtos
         self.cursor.execute("PRAGMA table_info(produtos)")
         if 'categoria' not in [col[1] for col in self.cursor.fetchall()]:
             self.cursor.execute("ALTER TABLE produtos ADD COLUMN categoria TEXT")
             self.db.commit()
+
+        self.atualizar_lista_produtos()
 
         # BINDINGS DE NAVEGAÇÃO (Cardápio)
         self.ent_id_prod.bind('<Return>', lambda e: self.ent_nome_prod.focus())
@@ -1354,12 +1399,23 @@ class GestorDelivery(ctk.CTk):
         self.ent_tel.focus()
 
     def gerar_e_imprimir_comanda(self, id_pedido, vf, num_dia, tipo=None, cliente_info=None, itens_comanda=None):
-        # Configurações da Comanda (80mm de largura)
-        largura = 80 * mm
+        # Mapeamento de escalas de fonte (5 opções cada)
+        font_header = [10, 12, 14, 16, 18][self.tam_cabecalho]
+        font_addr = [8, 9, 10, 11, 12][self.tam_endereco]
+        font_items = [7, 8, 9, 10, 11][self.tam_itens]
+        font_vals = [7, 8, 9, 10, 11][self.tam_valores]
+
+        # Configurações da Comanda
+        largura = self.largura_papel * mm
         
-        # Largura útil para texto (descontando margens de 5mm cada lado)
-        # Aproximadamente 36-38 caracteres para Helvetica 9/10pt
-        char_limit = 34
+        # Função para calcular limite de caracteres dinamicamente para evitar escape
+        def get_char_limit(f_size):
+            # Estimativa para Helvetica: largura útil (papel - 10mm margem) / largura média caractere
+            area_util_pts = (self.largura_papel - 10) * 2.83
+            return int(area_util_pts / (f_size * 0.52))
+
+        limit_addr = get_char_limit(font_addr)
+        limit_items = get_char_limit(font_items)
 
         if tipo is None:
             self.cursor.execute("SELECT tipo FROM pedidos WHERE id_pedido = ?", (id_pedido,))
@@ -1390,7 +1446,7 @@ class GestorDelivery(ctk.CTk):
 
         linhas_cabecalho = []
         for info in cliente_txt_list:
-            linhas_cabecalho.extend(textwrap.wrap(info, width=char_limit))
+            linhas_cabecalho.extend(textwrap.wrap(info, width=limit_addr))
 
         # Coleta e prepara quebras de linha para as observações antes de calcular altura
         itens = []
@@ -1403,12 +1459,12 @@ class GestorDelivery(ctk.CTk):
         for val in itens_comanda:
             # Wrap do nome do produto
             nome_item = f"{val[2]}x {val[1]}"
-            nome_wrap = textwrap.wrap(nome_item, width=char_limit - 10) # Menor para caber o preço na lateral
+            nome_wrap = textwrap.wrap(nome_item, width=limit_items - 10)
             if not nome_wrap: nome_wrap = ["---"]
 
             # Wrap da observação
             obs = str(val[5])
-            obs_wrap = textwrap.wrap(f"Obs: {obs}", width=char_limit - 4) if obs else []
+            obs_wrap = textwrap.wrap(f"Obs: {obs}", width=limit_items - 4) if obs else []
             
             itens.append({
                 'nome_linhas': nome_wrap,
@@ -1431,7 +1487,7 @@ class GestorDelivery(ctk.CTk):
         c = canvas.Canvas(nome_arquivo, pagesize=(largura, altura))
         y = altura - 10*mm
         
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont("Helvetica-Bold", font_header)
         c.drawCentredString(largura/2, y, self.nome_empresa)
         y -= 6*mm
         if self.fone_empresa:
@@ -1447,7 +1503,7 @@ class GestorDelivery(ctk.CTk):
         y -= 10*mm
         
         # Dados do Endereço
-        c.setFont("Helvetica", 10)
+        c.setFont("Helvetica", font_addr)
         for linha in linhas_cabecalho:
             c.drawString(5*mm, y, linha)
             y -= 5*mm
@@ -1458,7 +1514,7 @@ class GestorDelivery(ctk.CTk):
         c.setFont("Helvetica-Bold", 9)
         c.drawString(5*mm, y, "ITENS")
         y -= 5*mm
-        c.setFont("Helvetica", 9)
+        c.setFont("Helvetica", font_items)
         
         for it in itens:
             # Nome do item (primeira linha com preço)
@@ -1473,18 +1529,18 @@ class GestorDelivery(ctk.CTk):
 
             # Observações
             if it['obs_linhas']:
-                c.setFont("Helvetica-Oblique", 8)
+                c.setFont("Helvetica-Oblique", font_items - 1)
                 for linha in it['obs_linhas']:
                     c.drawString(8*mm, y, linha)
                     y -= 4*mm
-                c.setFont("Helvetica", 9)
+                c.setFont("Helvetica", font_items)
 
         y -= 3*mm
         c.line(5*mm, y, largura-5*mm, y)
         y -= 5*mm
         
         # Detalhamento de Valores
-        c.setFont("Helvetica", 9)
+        c.setFont("Helvetica", font_vals)
         
         troco = max(0, vf.get('recebido', 0) - vf['total'])
         vals = [("Sub-total:", vf['subtotal']), ("Taxa Entrega:", vf['taxa']), 
@@ -1534,7 +1590,7 @@ class GestorDelivery(ctk.CTk):
 
                     for _ in range(self.num_vias):
                         win32api.ShellExecute(0, verb, caminho_absoluto, params, ".", 0)
-                        time.sleep(1.5) # Pequena pausa para o spooler de impressão processar
+                        time.sleep(0.3)
             else:
                 raise Exception("Biblioteca win32print não instalada.")
         except Exception as e:
@@ -1593,6 +1649,10 @@ class GestorDelivery(ctk.CTk):
         self.ent_conf_vias.grid(row=2, column=1, padx=5, pady=10, sticky="w")
         self.ent_conf_vias.insert(0, str(self.num_vias))
 
+        btn_cfg_print = ctk.CTkButton(frame_print, text="⚙️ CONFIGURAR TAMANHOS E PAPEL", 
+                                      fg_color="#34495e", command=self.abrir_config_impressora)
+        btn_cfg_print.grid(row=3, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
+
         # --- SEÇÃO 3: OPERACIONAL ---
         frame_pref = self.criar_card_container("⚙️ PREFERÊNCIAS OPERACIONAIS")
         self.sw_abrir_pdf = ctk.CTkSwitch(frame_pref, text="Modo de Teste (Abrir PDF na tela em vez de imprimir)")
@@ -1606,6 +1666,82 @@ class GestorDelivery(ctk.CTk):
                                         command=self.salvar_todas_configs)
         btn_salvar_tudo.pack(pady=20, padx=20, fill="x")
 
+    def abrir_config_impressora(self):
+        pop = ctk.CTkToplevel(self)
+        pop.title("Ajustes de Impressão")
+        pop.geometry("450x550")
+        pop.grab_set()
+        pop.attributes("-topmost", True)
+
+        f = ctk.CTkFrame(pop, fg_color="white")
+        f.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(f, text="📏 LARGURA E FONTES", font=Theme.FONT_H2).pack(pady=10)
+
+        def criar_slider(label, var_name, current_val):
+            ctk.CTkLabel(f, text=label, font=Theme.FONT_LABEL).pack(anchor="w", padx=10)
+            s = ctk.CTkSegmentedButton(f, values=["Mínimo", "Pequeno", "Médio", "Grande", "Máximo"])
+            s.pack(fill="x", padx=10, pady=(0, 10))
+            s.set(["Mínimo", "Pequeno", "Médio", "Grande", "Máximo"][current_val])
+            return s
+
+        ctk.CTkLabel(f, text="Largura do Papel (mm):", font=Theme.FONT_LABEL).pack(anchor="w", padx=10)
+        ed_largura = ctk.CTkEntry(f)
+        ed_largura.insert(0, str(self.largura_papel))
+        ed_largura.pack(fill="x", padx=10, pady=(0, 15))
+
+        seg_cab = criar_slider("Tamanho do Cabeçalho:", "tam_cabecalho", self.tam_cabecalho)
+        seg_end = criar_slider("Tamanho do Endereço:", "tam_endereco", self.tam_endereco)
+        seg_itm = criar_slider("Tamanho dos Itens:", "tam_itens", self.tam_itens)
+        seg_val = criar_slider("Tamanho dos Valores:", "tam_valores", self.tam_valores)
+
+        def aplicar():
+            mapa = {"Mínimo": 0, "Pequeno": 1, "Médio": 2, "Grande": 3, "Máximo": 4}
+            self.largura_papel = int(ed_largura.get())
+            self.tam_cabecalho = mapa[seg_cab.get()]
+            self.tam_endereco = mapa[seg_end.get()]
+            self.tam_itens = mapa[seg_itm.get()]
+            self.tam_valores = mapa[seg_val.get()]
+            self.salvar_todas_configs()
+            pop.destroy()
+
+        def imprimir_teste():
+            mapa = {"Mínimo": 0, "Pequeno": 1, "Médio": 2, "Grande": 3, "Máximo": 4}
+            try:
+                largura = int(ed_largura.get())
+                self.imprimir_pagina_teste(
+                    largura,
+                    mapa[seg_cab.get()],
+                    mapa[seg_end.get()],
+                    mapa[seg_itm.get()],
+                    mapa[seg_val.get()]
+                )
+            except ValueError:
+                messagebox.showerror("Erro", "Largura do papel inválida!")
+
+        ctk.CTkButton(f, text="🖨️ IMPRIMIR PÁGINA TESTE", fg_color="#34495e", command=imprimir_teste).pack(pady=(10, 0), fill="x", padx=10)
+        ctk.CTkButton(f, text="APLICAR E SALVAR", fg_color=Theme.SUCCESS, command=aplicar).pack(pady=20, fill="x", padx=10)
+
+    def imprimir_pagina_teste(self, largura, tam_cab, tam_end, tam_itm, tam_val):
+        # Preserva configs atuais
+        old_largura, old_cab, old_end, old_itm, old_val = self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores
+        
+        # Aplica temporariamente para o teste
+        self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores = largura, tam_cab, tam_end, tam_itm, tam_val
+        
+        vf = {'subtotal': 15.0, 'taxa': 5.0, 'acrescimos': 0.0, 'descontos': 0.0, 'total': 20.0, 'recebido': 50.0, 'pagamento': 'DINHEIRO'}
+        cliente = {'nome': 'CLIENTE TESTE IMPRESSÃO', 'tel': '(00) 00000-0000', 'rua': 'RUA DE TESTE EQUIPAMENTO', 'num': '123', 'bairro': 'BAIRRO EXEMPLO', 'comp': 'LOJA 01'}
+        itens = [
+            (1, "PRODUTO TESTE 01", 2, "R$ 5.00", "10.00", "Sem cebola"),
+            (2, "PRODUTO TESTE 02", 1, "R$ 5.00", "5.00", "")
+        ]
+        
+        try:
+            self.gerar_e_imprimir_comanda(0, vf, 1, tipo="ENTREGA", cliente_info=cliente, itens_comanda=itens)
+        finally:
+            # Restaura para as configurações salvas anteriormente
+            self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores = old_largura, old_cab, old_end, old_itm, old_val
+
     def salvar_todas_configs(self):
         try:
             configs = {
@@ -1614,7 +1750,12 @@ class GestorDelivery(ctk.CTk):
                 'end_empresa': self.ent_conf_end.get(),
                 'num_vias': self.ent_conf_vias.get(),
                 'abrir_pdf': str(self.sw_abrir_pdf.get() == 1),
-                'impressora_selecionada': self.cb_impressora.get()
+                'impressora_selecionada': self.cb_impressora.get(),
+                'largura_papel': str(self.largura_papel),
+                'tam_cabecalho': str(self.tam_cabecalho),
+                'tam_endereco': str(self.tam_endereco),
+                'tam_itens': str(self.tam_itens),
+                'tam_valores': str(self.tam_valores)
             }
             
             for chave, valor in configs.items():
