@@ -6,7 +6,6 @@ import sqlite3
 import os
 import shutil
 import time
-import tempfile
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageOps
 
@@ -16,9 +15,6 @@ try:
 except ImportError:
     DateEntry = None
 
-# Bibliotecas para impressão e PDF
-from reportlab.pdfgen import canvas
-from reportlab.lib.pagesizes import mm
 try:
     import win32print
     import win32api
@@ -57,7 +53,6 @@ class GestorDelivery(ctk.CTk):
         self.fone_empresa = "(00) 0000-0000"
         self.end_empresa = ""
         self.num_vias = 1
-        self.abrir_pdf = False
 
         # Configurações de Impressão Avançadas
         self.largura_papel = 80
@@ -65,7 +60,6 @@ class GestorDelivery(ctk.CTk):
         self.tam_endereco = 2  # Índice 2 = Médio (10pt)
         self.tam_itens = 2     # Índice 2 = Médio (9pt)
         self.tam_valores = 2   # Índice 2 = Médio (9pt)
-        self.salvar_pdf_comandas = True
 
         self.editando_id_pedido = None
         self.title("VEX - Gestor de Comandas")
@@ -104,13 +98,11 @@ class GestorDelivery(ctk.CTk):
                 elif chave == 'fone_empresa': self.fone_empresa = valor
                 elif chave == 'end_empresa': self.end_empresa = valor
                 elif chave == 'num_vias': self.num_vias = int(valor) if valor.isdigit() else 1
-                elif chave == 'abrir_pdf': self.abrir_pdf = valor == "True"
                 elif chave == 'largura_papel': self.largura_papel = int(valor) if valor.isdigit() else 80
                 elif chave == 'tam_cabecalho': self.tam_cabecalho = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_endereco': self.tam_endereco = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_itens': self.tam_itens = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
-                elif chave == 'salvar_pdf_comandas': self.salvar_pdf_comandas = valor == "True"
                 elif chave == 'logo_path':
                     if os.path.exists(valor): self.logo_path = valor
             
@@ -1401,205 +1393,109 @@ class GestorDelivery(ctk.CTk):
         self.ent_tel.focus()
 
     def gerar_e_imprimir_comanda(self, id_pedido, vf, num_dia, tipo=None, cliente_info=None, itens_comanda=None):
-        # Mapeamento de escalas de fonte (5 opções cada)
-        font_header = [10, 12, 14, 16, 18][self.tam_cabecalho]
-        font_addr = [8, 9, 10, 11, 12][self.tam_endereco]
-        font_items = [7, 8, 9, 10, 11][self.tam_itens]
-        font_vals = [7, 8, 9, 10, 11][self.tam_valores]
-
-        # Configurações da Comanda
-        largura = self.largura_papel * mm
-        
-        # Função para calcular limite de caracteres dinamicamente para evitar escape
-        def get_char_limit(f_size):
-            # Estimativa para Helvetica: largura útil (papel - 10mm margem) / largura média caractere
-            area_util_pts = (self.largura_papel - 10) * 2.83
-            return int(area_util_pts / (f_size * 0.52))
-
-        limit_addr = get_char_limit(font_addr)
-        limit_items = get_char_limit(font_items)
-
-        if tipo is None:
-            self.cursor.execute("SELECT tipo FROM pedidos WHERE id_pedido = ?", (id_pedido,))
-            res_tipo = self.cursor.fetchone()
-            tipo = res_tipo[0] if res_tipo else "ENTREGA"
-
-        label_tipo = "Entrega" if tipo == "ENTREGA" else "Retirada"
-
-        # Se não enviarmos cliente_info (venda direta), pegamos dos campos da tela
-        if cliente_info is None:
-            cliente_info = {
-                'nome': self.ent_nome.get(),
-                'tel': self.ent_tel.get(),
-                'rua': self.ent_rua.get(),
-                'num': self.ent_num.get(),
-                'bairro': self.ent_bairro.get(),
-                'comp': self.ent_comp.get()
-            }
-
-        cliente_txt_list = [
-            f"Cliente: {cliente_info['nome']}",
-            f"Tel: {cliente_info['tel']}",
-            f"End: {cliente_info['rua']}, {cliente_info['num']}",
-            f"Bairro: {cliente_info['bairro']}"
-        ]
-        if cliente_info['comp']:
-            cliente_txt_list.append(f"Comp: {cliente_info['comp']}")
-
-        linhas_cabecalho = []
-        for info in cliente_txt_list:
-            linhas_cabecalho.extend(textwrap.wrap(info, width=limit_addr))
-
-        # Coleta e prepara quebras de linha para as observações antes de calcular altura
-        itens = []
-        linhas_corpo = 0
-        
-        # Se não enviarmos os itens (venda direta), pegamos da tabela da tela
-        if itens_comanda is None:
-            itens_comanda = [self.tree.item(item_id)['values'] for item_id in self.tree.get_children()]
-
-        for val in itens_comanda:
-            # Wrap do nome do produto
-            nome_item = f"{val[2]}x {val[1]}"
-            nome_wrap = textwrap.wrap(nome_item, width=limit_items - 10)
-            if not nome_wrap: nome_wrap = ["---"]
-
-            # Wrap da observação
-            obs = str(val[5])
-            obs_wrap = textwrap.wrap(f"Obs: {obs}", width=limit_items - 4) if obs else []
-            
-            itens.append({
-                'nome_linhas': nome_wrap,
-                'preco_total': val[4],
-                'obs_linhas': obs_wrap
-            })
-            linhas_corpo += len(nome_wrap) + len(obs_wrap)
-        
-        # Altura dinâmica: Base(80) + Cliente(linhas*5) + Itens(linhas*5)
-        altura = (80 + (len(linhas_cabecalho) * 5) + (linhas_corpo * 5)) * mm
-        
-        # Dados do Cliente
-        data_hora_arq = datetime.now().strftime("%d-%m-%Y - %H-%M-%S")
-        data_formatada = datetime.now().strftime("%d/%m/%Y %H:%M")
-
-        if self.salvar_pdf_comandas:
-            if not os.path.exists("Comandas"): os.makedirs("Comandas")
-            nome_arquivo = f"Comandas/{data_hora_arq} - {label_tipo} N° {num_dia}.pdf"
-        else:
-            nome_arquivo = os.path.join(tempfile.gettempdir(), f"vex_temp_{id_pedido}.pdf")
-        
-        # Geração do PDF
-        c = canvas.Canvas(nome_arquivo, pagesize=(largura, altura))
-        y = altura - 10*mm
-        
-        c.setFont("Helvetica-Bold", font_header)
-        c.drawCentredString(largura/2, y, self.nome_empresa)
-        y -= 6*mm
-        if self.fone_empresa:
-            c.setFont("Helvetica", 10)
-            c.drawCentredString(largura/2, y, self.fone_empresa)
-            y -= 5*mm
-
-        c.setFont("Helvetica-Bold", 12)
-        c.drawCentredString(largura/2, y, f"{label_tipo} n° {num_dia}")
-        y -= 7*mm
-        c.setFont("Helvetica", 10)
-        c.drawCentredString(largura/2, y, data_formatada)
-        y -= 10*mm
-        
-        # Dados do Endereço
-        c.setFont("Helvetica", font_addr)
-        for linha in linhas_cabecalho:
-            c.drawString(5*mm, y, linha)
-            y -= 5*mm
-        
-        y -= 2*mm
-        c.line(5*mm, y, largura-5*mm, y)
-        y -= 5*mm
-        c.setFont("Helvetica-Bold", 9)
-        c.drawString(5*mm, y, "ITENS")
-        y -= 5*mm
-        c.setFont("Helvetica", font_items)
-        
-        for it in itens:
-            # Nome do item (primeira linha com preço)
-            c.drawString(5*mm, y, it['nome_linhas'][0])
-            c.drawRightString(largura-5*mm, y, f"R$ {it['preco_total']}")
-            y -= 5*mm
-            
-            # Continuação do nome se houver wrap
-            for extra in it['nome_linhas'][1:]:
-                c.drawString(8*mm, y, extra)
-                y -= 4*mm
-
-            # Observações
-            if it['obs_linhas']:
-                c.setFont("Helvetica-Oblique", font_items - 1)
-                for linha in it['obs_linhas']:
-                    c.drawString(8*mm, y, linha)
-                    y -= 4*mm
-                c.setFont("Helvetica", font_items)
-
-        y -= 3*mm
-        c.line(5*mm, y, largura-5*mm, y)
-        y -= 5*mm
-        
-        # Detalhamento de Valores
-        c.setFont("Helvetica", font_vals)
-        
-        troco = max(0, vf.get('recebido', 0) - vf['total'])
-        vals = [("Sub-total:", vf['subtotal']), ("Taxa Entrega:", vf['taxa']), 
-                ("Acrescimos:", vf['acrescimos']), ("Descontos:", -vf['descontos']),
-                (f"Pagamento ({vf.get('pagamento', 'N/A')}):", vf['total']),
-                ("Troco para:", vf.get('recebido', 0)) if troco > 0 else ("", 0)]
-
-        for label, valor in vals:
-            if not label: continue
-            c.drawString(5*mm, y, label)
-            c.drawRightString(largura-5*mm, y, f"R$ {valor:.2f}")
-            y -= 4*mm
-            
-        y -= 2*mm
-        c.setFont("Helvetica-Bold", 11)
-        c.drawRightString(largura-5*mm, y, f"TOTAL: R$ {vf['total']:.2f}")
-        c.save()
-
-        # Converte para caminho absoluto para evitar erro de arquivo não encontrado no ShellExecute
-        caminho_absoluto = os.path.abspath(nome_arquivo)
-
-        # Se o modo de teste estiver ativo, apenas abre o PDF
-        if self.abrir_pdf:
-            os.startfile(caminho_absoluto)
+        if not WIN32_PRINTER_AVAILABLE:
+            messagebox.showerror("Erro", "Recursos de impressão não disponíveis neste sistema.")
             return
 
-        # Tentativa de Impressão
         try:
-            if WIN32_PRINTER_AVAILABLE:
-                # Usa a impressora selecionada ou a padrão do sistema
-                printer_to_use = self.impressora_selecionada if self.impressora_selecionada and self.impressora_selecionada != "Nenhuma" else win32print.GetDefaultPrinter()
+            # Configurações de caracteres baseadas na largura do papel (ESC/POS)
+            limit = int(self.largura_papel * 0.53)
+            
+            # Comandos ESC/POS básicos
+            INIT = b'\x1b@'
+            CENTER = b'\x1ba\x01'
+            LEFT = b'\x1ba\x00'
+            BOLD_ON = b'\x1bE\x01'
+            BOLD_OFF = b'\x1bE\x00'
+            # GS ! n (Tamanho da fonte: 0x00=normal, 0x01=dobro altura, 0x11=dobro total)
+            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x01', b'\x1d!\x10', b'\x1d!\x11', b'\x1d!\x21']
+            
+            raw = INIT + CENTER
+            
+            # Cabeçalho
+            raw += TAM_MAP[self.tam_cabecalho] + BOLD_ON + self.nome_empresa.encode('ascii', 'ignore') + b'\n'
+            raw += TAM_MAP[0] + BOLD_OFF + self.fone_empresa.encode('ascii', 'ignore') + b'\n'
+            
+            label_tipo = "Entrega" if tipo == "ENTREGA" else "Retirada"
+            raw += b'\n' + BOLD_ON + f"{label_tipo.upper()} N. {num_dia}".encode() + BOLD_OFF + b'\n'
+            raw += datetime.now().strftime("%d/%m/%Y %H:%M").encode() + b'\n'
+            raw += b'-' * limit + b'\n'
+            
+            # Cliente e Endereço
+            raw += LEFT + TAM_MAP[self.tam_endereco]
+            if cliente_info is None:
+                cliente_info = {'nome': self.ent_nome.get(), 'tel': self.ent_tel.get(), 'rua': self.ent_rua.get(), 
+                               'num': self.ent_num.get(), 'bairro': self.ent_bairro.get(), 'comp': self.ent_comp.get()}
+            
+            cli_txt = f"Cliente: {cliente_info['nome']}\nTel: {cliente_info['tel']}\n"
+            if tipo == "ENTREGA":
+                cli_txt += f"End: {cliente_info['rua']}, {cliente_info['num']}\nBairro: {cliente_info['bairro']}\n"
+                if cliente_info['comp']: cli_txt += f"Comp: {cliente_info['comp']}\n"
+            
+            for linha in cli_txt.split('\n'):
+                for wrap_l in textwrap.wrap(linha, width=limit):
+                    raw += wrap_l.encode('ascii', 'ignore') + b'\n'
+            
+            raw += b'-' * limit + b'\n'
+            
+            # Itens
+            raw += BOLD_ON + b"ITENS\n" + BOLD_OFF + TAM_MAP[self.tam_itens]
+            if itens_comanda is None:
+                itens_comanda = [self.tree.item(item_id)['values'] for item_id in self.tree.get_children()]
+            
+            for val in itens_comanda:
+                # val: (ID, Produto, Qtd, PrecoUnit, Total, Obs)
+                qtd_nome = f"{val[2]}x {val[1]}"
+                preco = f"R$ {val[4]}"
                 
-                if printer_to_use:
-                    if self.impressora_selecionada and self.impressora_selecionada != "Nenhuma":
-                        verb = "printto"
-                        # Busca detalhes técnicos (Nome, Driver, Porta) exigidos por muitos visualizadores de PDF
-                        try:
-                            hPrinter = win32print.OpenPrinter(printer_to_use)
-                            pinfo = win32print.GetPrinter(hPrinter, 2)
-                            params = f'"{pinfo["pPrinterName"]}" "{pinfo["pDriverName"]}" "{pinfo["pPortName"]}"'
-                            win32print.ClosePrinter(hPrinter)
-                        except:
-                            params = f'"{printer_to_use}"'
-                    else:
-                        verb = "print"
-                        params = None
-
-                    for _ in range(self.num_vias):
-                        win32api.ShellExecute(0, verb, caminho_absoluto, params, ".", 0)
-                        time.sleep(0.3)
-            else:
-                raise Exception("Biblioteca win32print não instalada.")
+                espacos = limit - len(qtd_nome) - len(preco)
+                if espacos < 1:
+                    linhas_nome = textwrap.wrap(qtd_nome, width=limit-10)
+                    raw += linhas_nome[0].encode('ascii', 'ignore')
+                    espacos = limit - len(linhas_nome[0]) - len(preco)
+                    raw += b' ' * espacos + preco.encode() + b'\n'
+                    for extra in linhas_nome[1:]:
+                        raw += b'  ' + extra.encode('ascii', 'ignore') + b'\n'
+                else:
+                    raw += qtd_nome.encode('ascii', 'ignore') + (b' ' * espacos) + preco.encode() + b'\n'
+                
+                if val[5]: # Observação
+                    for obs_l in textwrap.wrap(f"Obs: {val[5]}", width=limit-2):
+                        raw += b'  ' + obs_l.encode('ascii', 'ignore') + b'\n'
+            
+            raw += b'-' * limit + b'\n'
+            
+            # Valores Finais
+            raw += TAM_MAP[self.tam_valores]
+            vals = [("Sub-total:", vf['subtotal']), ("Taxa Entrega:", vf['taxa']), 
+                    ("Descontos:", -vf['descontos']), ("TOTAL:", vf['total'])]
+            
+            for lbl, v in vals:
+                txt_v = f"R$ {v:.2f}"
+                espacos = limit - len(lbl) - len(txt_v)
+                raw += lbl.encode() + (b' ' * espacos) + txt_v.encode() + b'\n'
+            
+            raw += b'\n' + BOLD_ON + CENTER + f"PAGAMENTO: {vf.get('pagamento', 'N/A')}".encode() + b'\n'
+            
+            # Rodapé e Corte
+            raw += b'\n' * 3 + b'\x1dV\x42\x00' # Comando de corte
+            
+            # Envio para impressora
+            printer_to_use = self.impressora_selecionada if self.impressora_selecionada and self.impressora_selecionada != "Nenhuma" else win32print.GetDefaultPrinter()
+            hPrinter = win32print.OpenPrinter(printer_to_use)
+            try:
+                for _ in range(self.num_vias):
+                    win32print.StartDocPrinter(hPrinter, 1, ("Comanda VEX", None, "RAW"))
+                    win32print.StartPagePrinter(hPrinter)
+                    win32print.WritePrinter(hPrinter, raw)
+                    win32print.EndPagePrinter(hPrinter)
+                    win32print.EndDocPrinter(hPrinter)
+                    time.sleep(0.1)
+            finally:
+                win32print.ClosePrinter(hPrinter)
+                
         except Exception as e:
-            print(f"Impressora não encontrada ou erro: {e}. PDF salvo em Comandas.")
+            messagebox.showerror("Erro de Impressão", f"Não foi possível imprimir: {e}")
 
     def mostrar_tela_configuracoes(self):
         self.limpar_container()
@@ -1654,19 +1550,11 @@ class GestorDelivery(ctk.CTk):
         self.ent_conf_vias.grid(row=2, column=1, padx=5, pady=10, sticky="w")
         self.ent_conf_vias.insert(0, str(self.num_vias))
 
-        btn_cfg_print = ctk.CTkButton(frame_print, text="⚙️ CONFIGURAR TAMANHOS E PAPEL", 
-                                      fg_color="#34495e", command=self.abrir_config_impressora)
-        btn_cfg_print.grid(row=3, column=0, columnspan=2, padx=15, pady=10, sticky="ew")
-
         # --- SEÇÃO 3: OPERACIONAL ---
         frame_pref = self.criar_card_container("⚙️ PREFERÊNCIAS OPERACIONAIS")
-        self.sw_abrir_pdf = ctk.CTkSwitch(frame_pref, text="Modo de Teste (Abrir PDF na tela em vez de imprimir)")
-        self.sw_abrir_pdf.grid(row=1, column=0, padx=15, pady=15, sticky="w")
-        if self.abrir_pdf: self.sw_abrir_pdf.select()
-
-        self.sw_salvar_pdf = ctk.CTkSwitch(frame_pref, text="Salvar histórico de pedidos (PDF) na pasta 'Comandas'")
-        self.sw_salvar_pdf.grid(row=2, column=0, padx=15, pady=15, sticky="w")
-        if self.salvar_pdf_comandas: self.sw_salvar_pdf.select()
+        btn_cfg_print = ctk.CTkButton(frame_pref, text="⚙️ AJUSTES DE TAMANHO E PAPEL", 
+                                      fg_color="#34495e", command=self.abrir_config_impressora)
+        btn_cfg_print.grid(row=1, column=0, padx=15, pady=15, sticky="w")
 
         # Botão Salvar Geral
         btn_salvar_tudo = ctk.CTkButton(self.container, text="💾 SALVAR TODAS AS CONFIGURAÇÕES", 
@@ -1758,14 +1646,12 @@ class GestorDelivery(ctk.CTk):
                 'fone_empresa': self.ent_conf_fone.get(),
                 'end_empresa': self.ent_conf_end.get(),
                 'num_vias': self.ent_conf_vias.get(),
-                'abrir_pdf': str(self.sw_abrir_pdf.get() == 1),
                 'impressora_selecionada': self.cb_impressora.get(),
                 'largura_papel': str(self.largura_papel),
                 'tam_cabecalho': str(self.tam_cabecalho),
                 'tam_endereco': str(self.tam_endereco),
                 'tam_itens': str(self.tam_itens),
-                'tam_valores': str(self.tam_valores),
-                'salvar_pdf_comandas': str(self.sw_salvar_pdf.get() == 1)
+                'tam_valores': str(self.tam_valores)
             }
             
             for chave, valor in configs.items():
@@ -1778,9 +1664,7 @@ class GestorDelivery(ctk.CTk):
             self.fone_empresa = configs['fone_empresa']
             self.end_empresa = configs['end_empresa']
             self.num_vias = int(configs['num_vias']) if configs['num_vias'].isdigit() else 1
-            self.abrir_pdf = configs['abrir_pdf'] == "True"
             self.impressora_selecionada = None if configs['impressora_selecionada'] == "Nenhuma" else configs['impressora_selecionada']
-            self.salvar_pdf_comandas = configs['salvar_pdf_comandas'] == "True"
 
             messagebox.showinfo("Sucesso", "Configurações aplicadas!")
         except Exception as e:
