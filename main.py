@@ -219,7 +219,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.1-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.2-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
     def atualizar_sidebar(self, nome_ativo):
@@ -576,44 +576,11 @@ class GestorDelivery(ctk.CTk):
         self.list_sugestao = tk.Listbox(self.frame_sugestao, font=("Arial", 11), borderwidth=0, highlightthickness=0)
         self.list_sugestao.pack(fill="both", expand=True)
 
-        # --- BOTÕES DE AÇÃO E FILTRO ---
-        self.frame_acoes_prod = ctk.CTkFrame(self.container, fg_color="transparent")
-        self.frame_acoes_prod.pack(pady=10, padx=20, fill="x")
-
-        self.btn_salvar_prod = ctk.CTkButton(self.frame_acoes_prod, text="SALVAR (F2)", fg_color="#27ae60", height=35, command=self.salvar_produto_db)
-        self.btn_salvar_prod.pack(side="left", padx=5)
-
-        self.btn_limpar_prod = ctk.CTkButton(self.frame_acoes_prod, text="LIMPAR (F3)", fg_color="gray", height=35, command=self.limpar_campos_cardapio)
-        self.btn_limpar_prod.pack(side="left", padx=5)
-
-        self.btn_excluir_prod = ctk.CTkButton(self.frame_acoes_prod, text="EXCLUIR (DEL)", fg_color="#e74c3c", height=35, command=self.excluir_produto_db)
-        self.btn_excluir_prod.pack(side="right", padx=5)
-
-        ctk.CTkLabel(self.frame_acoes_prod, text="🔍 Filtrar:", font=Theme.FONT_LABEL).pack(side="right", padx=5)
-        self.cb_filtro_cat = ctk.CTkComboBox(self.frame_acoes_prod, values=["TODOS"], command=lambda _: self.atualizar_lista_produtos())
-        self.cb_filtro_cat.pack(side="right", padx=5)
-        self.cb_filtro_cat.set("TODOS")
-
-        # --- TABELA DE PRODUTOS ---
-        self.tree_prod = ttk.Treeview(self.container, columns=("ID", "Produto", "Categoria", "Preço"), show="headings")
-        self.tree_prod.heading("ID", text="ID")
-        self.tree_prod.heading("Produto", text="Nome do Produto")
-        self.tree_prod.heading("Categoria", text="Categoria")
-        self.tree_prod.heading("Preço", text="Preço (R$)")
-        self.tree_prod.column("ID", width=80, anchor="center")
-        self.tree_prod.column("Produto", width=300, anchor="w")
-        self.tree_prod.column("Categoria", width=150, anchor="center")
-        self.tree_prod.column("Preço", width=100, anchor="center")
-        self.tree_prod.pack(pady=10, padx=20, fill="both", expand=True)
-        self.tree_prod.bind("<<TreeviewSelect>>", self.preencher_campos_cardapio)
-
         # Adicionar campo Categoria na tabela de produtos
         self.cursor.execute("PRAGMA table_info(produtos)")
         if 'categoria' not in [col[1] for col in self.cursor.fetchall()]:
             self.cursor.execute("ALTER TABLE produtos ADD COLUMN categoria TEXT")
             self.db.commit()
-
-        self.atualizar_lista_produtos()
 
         # BINDINGS DE NAVEGAÇÃO (Cardápio)
         self.ent_id_prod.bind('<Return>', lambda e: self.ent_nome_prod.focus())
