@@ -1,4 +1,7 @@
-delivery.db
-*.pdf
 Comandas/
 assets/
+build/
+
+*.db
+*.pdf
+*.spec
