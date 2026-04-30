@@ -219,7 +219,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.2-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.3-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
     def atualizar_sidebar(self, nome_ativo):
