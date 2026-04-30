@@ -393,7 +393,7 @@ class GestorDelivery(ctk.CTk):
         self.ent_bairro.bind('<FocusOut>', lambda e: self.buscar_taxa_bairro())
         self.ent_rua.bind('<Return>', lambda e: self.ent_num.focus())
         self.ent_num.bind('<Return>', lambda e: self.ent_comp.focus())
-        self.ent_comp.bind('<Return>', lambda e: self.ent_id.focus())
+        self.ent_comp.bind('<Return>', self.confirmar_cadastro_cliente)
 
         # --- ÁREA DE LANÇAMENTO ---
         self.frame_lancamento = self.criar_card_container("🛒 LANÇAMENTO DE ITENS")
@@ -405,6 +405,8 @@ class GestorDelivery(ctk.CTk):
 
         ctk.CTkLabel(self.frame_lancamento, text="Qtd:").grid(row=1, column=2, padx=5)
         self.ent_qtd = ctk.CTkEntry(self.frame_lancamento, width=60, font=("Arial", 16))
+        self.ent_qtd.insert(0, "1")
+        self.ent_qtd.bind("<FocusIn>", lambda e: self.ent_qtd.after(10, lambda: self.ent_qtd.select_range(0, 'end')))
         self.ent_qtd.grid(row=1, column=3, padx=5)
 
         ctk.CTkLabel(self.frame_lancamento, text="Obs:").grid(row=1, column=4, padx=5)
@@ -496,6 +498,18 @@ class GestorDelivery(ctk.CTk):
         tree_con.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
 
+        def selecionar_produto(event):
+            sel = tree_con.selection()
+            if sel:
+                # Pega o ID (primeira coluna) do item selecionado
+                id_prod = tree_con.item(sel[0])['values'][0]
+                self.ent_id.delete(0, 'end')
+                self.ent_id.insert(0, id_prod)
+                self.focar_qtd(None) # Atualiza o nome do produto e pula para a quantidade
+                pop.destroy()
+
+        tree_con.bind("<Double-1>", selecionar_produto)
+
         def carregar_dados(termo=""):
             for i in tree_con.get_children(): tree_con.delete(i)
             if self.db:
@@ -512,7 +526,9 @@ class GestorDelivery(ctk.CTk):
 
         ctk.CTkButton(main_f, text="FECHAR (ESC)", fg_color="gray", command=pop.destroy).pack(pady=10)
         pop.bind("<Escape>", lambda e: pop.destroy())
-        ent_busca.focus()
+
+        # Garante o foco no campo de busca após a renderização (mesmo método do fechamento)
+        pop.after(200, lambda: ent_busca.focus())
 
     def toggle_modo_retirada(self):
         if self.modo_retirada.get():
@@ -1145,14 +1161,55 @@ class GestorDelivery(ctk.CTk):
             else:
                 self.ent_nome.focus()
 
+    def confirmar_cadastro_cliente(self, event=None):
+        tel = self.ent_tel.get().strip()
+        nome = self.ent_nome.get().strip()
+        
+        if not tel or not nome:
+            self.ent_id.focus()
+            return
+
+        bairro = self.ent_bairro.get().strip()
+        rua = self.ent_rua.get().strip()
+        num = self.ent_num.get().strip()
+        comp = self.ent_comp.get().strip()
+
+        # Verifica se houve alteração ou se é um novo cliente
+        self.cursor.execute("SELECT nome, bairro, rua, numero, complemento FROM clientes WHERE telefone = ?", (tel,))
+        res = self.cursor.fetchone()
+
+        houve_mudanca = False
+        if not res:
+            houve_mudanca = True
+        else:
+            dados_db = [str(x) if x is not None else "" for x in res]
+            if [nome, bairro, rua, num, comp] != dados_db:
+                houve_mudanca = True
+
+        if houve_mudanca:
+            if messagebox.askyesno("Salvar Cadastro", "Deseja salvar/atualizar os dados deste cliente no sistema?"):
+                self.cursor.execute("""INSERT OR REPLACE INTO clientes (telefone, nome, bairro, rua, numero, complemento) 
+                                     VALUES (?, ?, ?, ?, ?, ?)""", (tel, nome, bairro, rua, num, comp))
+                self.db.commit()
+        
+        self.ent_id.focus()
+
     def focar_qtd(self, event):
-        id_digitado = self.ent_id.get()
+        id_digitado = self.ent_id.get().strip()
         if id_digitado and self.db:
-            self.cursor.execute("SELECT nome, preco, id_produto FROM produtos WHERE id_produto = ? OR nome LIKE ?", (id_digitado, f"%{id_digitado}%"))
+            # Tenta buscar primeiro pelo ID exato para evitar que números contidos no nome do produto
+            # causem uma seleção errada (ex: digitar 500 e puxar o item 153 pq o nome tem '500ml')
+            self.cursor.execute("SELECT nome, preco, id_produto FROM produtos WHERE id_produto = ?", (id_digitado,))
             res = self.cursor.fetchone()
+
+            # Se não encontrar por ID, tenta buscar por parte do nome
+            if not res:
+                self.cursor.execute("SELECT nome, preco, id_produto FROM produtos WHERE nome LIKE ?", (f"%{id_digitado}%",))
+                res = self.cursor.fetchone()
+
             if res:
                 self.ent_id.delete(0, 'end'); self.ent_id.insert(0, res[2]) # Garante o ID no campo
-                self.lbl_nome_prod.configure(text=f"{res[0]} - R$ {res[1]}", text_color=Theme.SUCCESS)
+                self.lbl_nome_prod.configure(text=f"{res[0]} - R$ {res[1]:.2f}", text_color=Theme.SUCCESS)
                 self.ent_qtd.focus()
             else:
                 self.lbl_nome_prod.configure(text="Produto não encontrado!", text_color="red")
@@ -1174,7 +1231,7 @@ class GestorDelivery(ctk.CTk):
                 nome, preco = res
                 total_item = int(qtd) * float(preco)
                 self.tree.insert("", "end", values=(id_item, nome, qtd, f"R$ {preco}", f"{total_item:.2f}", obs))
-                self.ent_id.delete(0, 'end'); self.ent_qtd.delete(0, 'end'); self.ent_obs.delete(0, 'end')
+                self.ent_id.delete(0, 'end'); self.ent_qtd.delete(0, 'end'); self.ent_qtd.insert(0, "1"); self.ent_obs.delete(0, 'end')
                 self.lbl_nome_prod.configure(text="Produto: ---")
                 self.ent_id.focus()
                 self.atualizar_total()
@@ -1288,20 +1345,7 @@ class GestorDelivery(ctk.CTk):
 
             if tel and nome:
                 tipo_pedido = "RETIRADA" if self.modo_retirada.get() else "ENTREGA"
-                # SQLite UPSERT: Insere ou substitui se o telefone já existir
-                sql = """INSERT INTO clientes (telefone, nome, bairro, rua, numero, complemento) 
-                         VALUES (?, ?, ?, ?, ?, ?) 
-                         ON CONFLICT(telefone) DO UPDATE SET 
-                         nome=excluded.nome, 
-                         bairro=CASE WHEN excluded.bairro != '' THEN excluded.bairro ELSE clientes.bairro END,
-                         rua=CASE WHEN excluded.rua != '' THEN excluded.rua ELSE clientes.rua END,
-                         numero=CASE WHEN excluded.numero != '' THEN excluded.numero ELSE clientes.numero END,
-                         complemento=CASE WHEN excluded.complemento != '' THEN excluded.complemento ELSE clientes.complemento END"""
-                val = (tel, nome, bairro, rua, num, comp)
                 try:
-                    # 1. Salva/Atualiza Cliente
-                    self.cursor.execute(sql, val)
-
                     vf = self.valores_finais
                     if self.editando_id_pedido:
                         # 2. Atualiza o Pedido Existente em vez de criar um novo
