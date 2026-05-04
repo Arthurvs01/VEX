@@ -6,8 +6,16 @@ import sqlite3
 import os
 import shutil
 import time
+import threading
+import socket
+import logging
 from datetime import datetime
 from PIL import Image, ImageDraw, ImageOps
+
+try:
+    from flask import Flask, render_template_string, jsonify, request, send_file
+except ImportError:
+    Flask = None
 
 # Biblioteca para Calendário
 try:
@@ -45,9 +53,15 @@ class GestorDelivery(ctk.CTk):
         self.sidebar_expandido = True
         self.logo_path = None
         self.taxa_atual = 0.0
+        self.ip_local = self.obter_ip_local()
+        self.url_publica = None
         self.tipo_historico_atual = "ENTREGA"
         self.impressora_selecionada = None # Armazena a impressora configurada
         
+        # Iniciar Servidor do Cardápio Digital (Flask)
+        if Flask:
+            threading.Thread(target=self.rodar_servidor_web, daemon=True).start()
+
         # Configurações Padrão
         self.nome_empresa = "MINHA EMPRESA"
         self.fone_empresa = "(00) 0000-0000"
@@ -86,10 +100,25 @@ class GestorDelivery(ctk.CTk):
 
         # Conexão com o Banco de Dados
         try:
-            self.db = sqlite3.connect("delivery.db")
+            self.db = sqlite3.connect("delivery.db", check_same_thread=False)
             self.cursor = self.db.cursor()
             self.criar_tabelas()
+
+            # Atualização de Schema: Adicionar novas colunas se não existirem
+            self.cursor.execute("PRAGMA table_info(produtos)")
+            colunas = [col[1] for col in self.cursor.fetchall()]
+            if 'categoria' not in colunas:
+                self.cursor.execute("ALTER TABLE produtos ADD COLUMN categoria TEXT")
+            if 'ingredientes' not in colunas:
+                self.cursor.execute("ALTER TABLE produtos ADD COLUMN ingredientes TEXT")
+            if 'visivel_web' not in colunas:
+                self.cursor.execute("ALTER TABLE produtos ADD COLUMN visivel_web INTEGER DEFAULT 1")
             
+            self.cursor.execute("PRAGMA table_info(categorias)")
+            if 'ordem' not in [col[1] for col in self.cursor.fetchall()]:
+                self.cursor.execute("ALTER TABLE categorias ADD COLUMN ordem INTEGER DEFAULT 0")
+            self.db.commit()
+
             # Carrega configurações do banco
             self.cursor.execute("SELECT chave, valor FROM config")
             for chave, valor in self.cursor.fetchall():
@@ -134,11 +163,15 @@ class GestorDelivery(ctk.CTk):
             """CREATE TABLE IF NOT EXISTS produtos (
                 id_produto INTEGER PRIMARY KEY,
                 nome TEXT,
-                preco REAL
+                preco REAL,
+                categoria TEXT,
+                ingredientes TEXT,
+                visivel_web INTEGER DEFAULT 1
             )""",
             """CREATE TABLE IF NOT EXISTS categorias (
                 id_categoria INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE
+                nome TEXT UNIQUE,
+                ordem INTEGER DEFAULT 0
             )""",
             """CREATE TABLE IF NOT EXISTS bairros (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,8 +252,14 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.3-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.4-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
+
+        # Link do WebApp na Sidebar
+        if Flask:
+            txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:5000"
+            self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Arial", 10, "bold"), text_color="#f1c40f")
+            self.lbl_link_web.pack(side="bottom", pady=2)
 
     def atualizar_sidebar(self, nome_ativo):
         """Atualiza a cor dos botões para indicar qual tela está ativa"""
@@ -324,10 +363,11 @@ class GestorDelivery(ctk.CTk):
         for widget in self.container.winfo_children():
             widget.destroy()
 
-    def criar_card_container(self, titulo, fg_color=None):
+    def criar_card_container(self, titulo, parent=None, fg_color=None):
         """Helper para criar uma seção padronizada (Card)"""
         color = fg_color if fg_color else Theme.BG_CARD
-        frame = ctk.CTkFrame(self.container, fg_color=color, border_color=Theme.BORDER, border_width=1)
+        p = parent if parent else self.container
+        frame = ctk.CTkFrame(p, fg_color=color, border_color=Theme.BORDER, border_width=1)
         frame.pack(pady=10, padx=20, fill="x")
         
         ctk.CTkLabel(frame, text=titulo, font=Theme.FONT_H2, text_color=Theme.PRIMARY).grid(row=0, column=0, columnspan=10, pady=(10, 5), padx=15, sticky="w")
@@ -576,34 +616,42 @@ class GestorDelivery(ctk.CTk):
         self.limpar_container()
         self.atualizar_sidebar("Cardápio")
 
+        # Inicializa o estado de ordenação padrão se não existir
+        if not hasattr(self, 'col_ordenacao_cardapio'):
+            self.col_ordenacao_cardapio = "ID"
+            self.ordem_reversa_cardapio = False
+
         # --- ÁREA DE CADASTRO DE PRODUTO ---
         self.frame_cad_prod = ctk.CTkFrame(self.container, fg_color="#f9f9f9", border_color="#e0e0e0", border_width=1)
         self.frame_cad_prod.pack(pady=10, padx=20, fill="x")
         ctk.CTkLabel(self.frame_cad_prod, text="🍎 CADASTRO DE PRODUTO", font=("Arial", 14, "bold"), text_color="#c0392b").grid(row=0, column=0, columnspan=4, pady=(10, 5), padx=15, sticky="w")
-        self.frame_cad_prod.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        self.frame_cad_prod.grid_columnconfigure((0, 1, 2), weight=1)
 
         self.ent_id_prod = self.criar_campo(self.frame_cad_prod, "ID (Código)", 1, 0)
         self.ent_nome_prod = self.criar_campo(self.frame_cad_prod, "Nome do Produto", 1, 1)
         self.ent_cat_prod = self.criar_campo(self.frame_cad_prod, "Categoria", 1, 2)
-        self.ent_preco_prod = self.criar_campo(self.frame_cad_prod, "Preço (R$)", 1, 3)
+
+        # Linha 2 de cadastro
+        self.ent_preco_prod = self.criar_campo(self.frame_cad_prod, "Preço (R$)", 2, 0)
+        self.ent_ingredientes_prod = self.criar_campo(self.frame_cad_prod, "Ingredientes (Opcional)", 2, 1)
+        
+        self.var_visivel_web = tk.BooleanVar(value=True)
+        self.cb_visivel_web = ctk.CTkCheckBox(self.frame_cad_prod, text="Visível no Cardápio Digital", 
+                                              variable=self.var_visivel_web, font=Theme.FONT_LABEL)
+        self.cb_visivel_web.grid(row=2, column=2, padx=10, pady=(20, 5), sticky="w")
 
         # Listbox para sugestões (criada após os campos para referência)
         self.frame_sugestao = tk.Frame(self.container, bg="white", highlightbackground="#d1d1d1", highlightthickness=1)
         self.list_sugestao = tk.Listbox(self.frame_sugestao, font=("Arial", 11), borderwidth=0, highlightthickness=0)
         self.list_sugestao.pack(fill="both", expand=True)
 
-        # Adicionar campo Categoria na tabela de produtos
-        self.cursor.execute("PRAGMA table_info(produtos)")
-        if 'categoria' not in [col[1] for col in self.cursor.fetchall()]:
-            self.cursor.execute("ALTER TABLE produtos ADD COLUMN categoria TEXT")
-            self.db.commit()
-
         # BINDINGS DE NAVEGAÇÃO (Cardápio)
-        self.ent_id_prod.bind('<Return>', lambda e: self.ent_nome_prod.focus())
+        self.ent_id_prod.bind('<Return>', self.buscar_produto_edicao)
         self.ent_nome_prod.bind('<Return>', lambda e: self.ent_cat_prod.focus())
         self.ent_cat_prod.bind('<Return>', self.processar_enter_categoria)
         self.ent_cat_prod.bind('<KeyRelease>', self.filtrar_categorias_sugestao)
-        self.ent_preco_prod.bind('<Return>', lambda e: self.salvar_produto_db())
+        self.ent_preco_prod.bind('<Return>', lambda e: self.ent_ingredientes_prod.focus())
+        self.ent_ingredientes_prod.bind('<Return>', lambda e: self.salvar_produto_db())
 
         # Atalhos Globais da Tela
         self.bind('<F2>', lambda e: self.salvar_produto_db())
@@ -687,6 +735,10 @@ class GestorDelivery(ctk.CTk):
         self.ent_preco_prod.focus()
 
     def ordenar_coluna_cardapio(self, col, reverse):
+        # Salva o estado atual da ordenação
+        self.col_ordenacao_cardapio = col
+        self.ordem_reversa_cardapio = reverse
+
         l = [(self.tree_prod.set(k, col), k) for k in self.tree_prod.get_children('')]
         
         # Tenta converter para número se for ID ou Preço para ordenar corretamente
@@ -704,11 +756,24 @@ class GestorDelivery(ctk.CTk):
         # Alterna a direção da próxima ordenação
         self.tree_prod.heading(col, command=lambda: self.ordenar_coluna_cardapio(col, not reverse))
 
+    def buscar_produto_edicao(self, event=None):
+        id_p = self.ent_id_prod.get().strip()
+        if id_p:
+            self.cursor.execute("SELECT id_produto, nome, categoria, preco, ingredientes, visivel_web FROM produtos WHERE id_produto = ?", (id_p,))
+            res = self.cursor.fetchone()
+            if res:
+                self.preencher_campos_com_dados(res)
+                self.ent_nome_prod.focus()
+            else:
+                self.ent_nome_prod.focus()
+
     def salvar_produto_db(self):
         id_p = self.ent_id_prod.get()
         nome = self.ent_nome_prod.get()
         preco = self.ent_preco_prod.get().replace(",", ".")
         cat = self.ent_cat_prod.get().strip()
+        ingredientes = self.ent_ingredientes_prod.get().strip()
+        visivel = 1 if self.var_visivel_web.get() else 0
 
         if not id_p or not nome or not preco or not cat:
             messagebox.showwarning("Aviso", "Preencha todos os campos!")
@@ -721,8 +786,8 @@ class GestorDelivery(ctk.CTk):
             if not self.cursor.fetchone():
                 self.cursor.execute("INSERT INTO categorias (nome) VALUES (?)", (cat,))
 
-            self.cursor.execute("INSERT OR REPLACE INTO produtos (id_produto, nome, preco, categoria) VALUES (?, ?, ?, ?)", 
-                                (id_p, nome, preco, cat))
+            self.cursor.execute("INSERT OR REPLACE INTO produtos (id_produto, nome, preco, categoria, ingredientes, visivel_web) VALUES (?, ?, ?, ?, ?, ?)", 
+                                (id_p, nome, preco, cat, ingredientes, visivel))
             self.db.commit()
             self.atualizar_lista_produtos()
             self.limpar_campos_cardapio()
@@ -745,6 +810,10 @@ class GestorDelivery(ctk.CTk):
             messagebox.showwarning("Aviso", "Digite um nome para a categoria!")
 
     def atualizar_lista_categorias(self):
+        # Remove categorias que não estão vinculadas a nenhum produto
+        self.cursor.execute("DELETE FROM categorias WHERE nome NOT IN (SELECT DISTINCT categoria FROM produtos WHERE categoria IS NOT NULL AND categoria != '')")
+        self.db.commit()
+
         self.cursor.execute("SELECT nome FROM categorias ORDER BY nome")
         cats = [linha[0] for linha in self.cursor.fetchall()]
 
@@ -769,30 +838,43 @@ class GestorDelivery(ctk.CTk):
         
         filtro = self.cb_filtro_cat.get()
         if filtro == "TODOS" or not filtro:
-            self.cursor.execute("SELECT id_produto, nome, categoria, preco FROM produtos ORDER BY nome")
+            self.cursor.execute("SELECT id_produto, nome, categoria, preco FROM produtos ORDER BY id_produto")
         else:
-            self.cursor.execute("SELECT id_produto, nome, categoria, preco FROM produtos WHERE categoria = ? ORDER BY nome", (filtro,))
+            self.cursor.execute("SELECT id_produto, nome, categoria, preco FROM produtos WHERE categoria = ? ORDER BY id_produto", (filtro,))
             
         for linha in self.cursor.fetchall():
             self.tree_prod.insert("", "end", values=(linha[0], linha[1], linha[2] if linha[2] else "-", f"{linha[3]:.2f}"))
         
         self.atualizar_lista_categorias()
 
+        # Reaplica a ordenação definida pelo operador (ou a padrão) após recarregar os dados
+        self.ordenar_coluna_cardapio(self.col_ordenacao_cardapio, self.ordem_reversa_cardapio)
+
     def preencher_campos_cardapio(self, event):
         item_sel = self.tree_prod.selection()
         if item_sel:
-            valores = self.tree_prod.item(item_sel)['values']
-            self.limpar_campos_cardapio()
-            self.ent_id_prod.insert(0, valores[0])
-            self.ent_nome_prod.insert(0, valores[1])
-            self.ent_cat_prod.insert(0, valores[2] if valores[2] != "-" else "")
-            self.ent_preco_prod.insert(0, valores[3])
+            id_p = self.tree_prod.item(item_sel)['values'][0]
+            self.cursor.execute("SELECT id_produto, nome, categoria, preco, ingredientes, visivel_web FROM produtos WHERE id_produto = ?", (id_p,))
+            res = self.cursor.fetchone()
+            if res:
+                self.preencher_campos_com_dados(res)
+
+    def preencher_campos_com_dados(self, dados):
+        self.limpar_campos_cardapio()
+        self.ent_id_prod.insert(0, dados[0])
+        self.ent_nome_prod.insert(0, dados[1])
+        self.ent_cat_prod.insert(0, dados[2] if dados[2] else "")
+        self.ent_preco_prod.insert(0, f"{dados[3]:.2f}")
+        self.ent_ingredientes_prod.insert(0, dados[4] if dados[4] else "")
+        self.var_visivel_web.set(True if dados[5] == 1 else False)
 
     def limpar_campos_cardapio(self):
         self.ent_id_prod.delete(0, 'end')
         self.ent_nome_prod.delete(0, 'end')
         self.ent_preco_prod.delete(0, 'end')
         self.ent_cat_prod.delete(0, 'end')
+        self.ent_ingredientes_prod.delete(0, 'end')
+        self.var_visivel_web.set(True)
         if hasattr(self, 'frame_sugestao'): self.frame_sugestao.place_forget()
         self.ent_id_prod.focus()
 
@@ -1512,8 +1594,12 @@ class GestorDelivery(ctk.CTk):
         self.limpar_container()
         self.atualizar_sidebar("Configurações")
 
+        # Criar frame rolável para organizar as configurações
+        self.scroll_config = ctk.CTkScrollableFrame(self.container, fg_color="transparent")
+        self.scroll_config.pack(fill="both", expand=True)
+
         # --- SEÇÃO 1: DADOS DO ESTABELECIMENTO ---
-        frame_empresa = self.criar_card_container("🏪 DADOS DO ESTABELECIMENTO")
+        frame_empresa = self.criar_card_container("🏪 DADOS DO ESTABELECIMENTO", parent=self.scroll_config)
         frame_empresa.grid_columnconfigure((0, 1), weight=1)
         
         self.ent_conf_nome = self.criar_campo(frame_empresa, "Nome da Empresa (Cabeçalho)", 1, 0)
@@ -1526,7 +1612,7 @@ class GestorDelivery(ctk.CTk):
         self.ent_conf_end.insert(0, self.end_empresa)
 
         # --- SEÇÃO 2: CONFIGURAÇÕES DE IMPRESSÃO ---
-        frame_print = self.criar_card_container("🖨️ CONFIGURAÇÕES DE IMPRESSÃO")
+        frame_print = self.criar_card_container("🖨️ CONFIGURAÇÕES DE IMPRESSÃO", parent=self.scroll_config)
         frame_print.grid_columnconfigure(1, weight=1)
 
         ctk.CTkLabel(frame_print, text="Impressora Selecionada:", font=Theme.FONT_LABEL).grid(row=1, column=0, padx=15, pady=10, sticky="w")
@@ -1561,18 +1647,56 @@ class GestorDelivery(ctk.CTk):
         self.ent_conf_vias.grid(row=2, column=1, padx=5, pady=10, sticky="w")
         self.ent_conf_vias.insert(0, str(self.num_vias))
 
-        # --- SEÇÃO 3: OPERACIONAL ---
-        frame_pref = self.criar_card_container("⚙️ PREFERÊNCIAS OPERACIONAIS")
-        btn_cfg_print = ctk.CTkButton(frame_pref, text="⚙️ AJUSTES DE TAMANHO E PAPEL", 
+        # Botão de ajustes movido para cá para melhor organização
+        btn_cfg_print = ctk.CTkButton(frame_print, text="⚙️ AJUSTES DE TAMANHO E PAPEL", 
                                       fg_color="#34495e", command=self.abrir_config_impressora)
-        btn_cfg_print.grid(row=1, column=0, padx=15, pady=15, sticky="w")
+        btn_cfg_print.grid(row=3, column=0, columnspan=2, padx=15, pady=15, sticky="w")
 
-        # Botão Salvar Geral
-        btn_salvar_tudo = ctk.CTkButton(self.container, text="💾 SALVAR TODAS AS CONFIGURAÇÕES", 
+        # --- SEÇÃO 3: ORDEM DO CARDÁPIO DIGITAL ---
+        frame_ordem_web = self.criar_card_container("🎨 ORDEM DAS CATEGORIAS (MOBILE)", parent=self.scroll_config)
+        frame_ordem_web.grid_columnconfigure(0, weight=1)
+        
+        f_ordem = ctk.CTkFrame(frame_ordem_web, fg_color="transparent")
+        f_ordem.grid(row=1, column=0, padx=15, pady=(5, 15), sticky="ew")
+        
+        self.tree_ordem_cat = ttk.Treeview(f_ordem, columns=("Nome"), show="headings", height=5)
+        self.tree_ordem_cat.heading("Nome", text="Arraste ou use as setas para organizar a exibição no celular")
+        self.tree_ordem_cat.pack(side="left", fill="x", expand=True)
+        
+        f_btns_cat = ctk.CTkFrame(f_ordem, fg_color="transparent")
+        f_btns_cat.pack(side="left", padx=5)
+        
+        ctk.CTkButton(f_btns_cat, text="MOVER PARA CIMA ▲", font=("Arial", 10, "bold"), width=140, height=35, fg_color="#34495e", command=lambda: self.mover_categoria_ordem(-1)).pack(pady=2)
+        ctk.CTkButton(f_btns_cat, text="MOVER PARA BAIXO ▼", font=("Arial", 10, "bold"), width=140, height=35, fg_color="#34495e", command=lambda: self.mover_categoria_ordem(1)).pack(pady=2)
+
+        self.atualizar_tree_ordem_categorias()
+
+        # Botão Salvar Geral - Fixo ao final
+        btn_salvar_tudo = ctk.CTkButton(self.scroll_config, text="💾 SALVAR TODAS AS CONFIGURAÇÕES", 
                                         fg_color=Theme.SUCCESS, hover_color="#219150", 
-                                        height=50, font=("Arial", 16, "bold"),
+                                        height=55, font=("Arial", 16, "bold"),
                                         command=self.salvar_todas_configs)
-        btn_salvar_tudo.pack(pady=20, padx=20, fill="x")
+        btn_salvar_tudo.pack(pady=25, padx=20, fill="x")
+
+    def atualizar_tree_ordem_categorias(self):
+        for i in self.tree_ordem_cat.get_children(): self.tree_ordem_cat.delete(i)
+        self.cursor.execute("SELECT nome FROM categorias ORDER BY ordem, nome")
+        for r in self.cursor.fetchall():
+            self.tree_ordem_cat.insert("", "end", values=(r[0],))
+
+    def mover_categoria_ordem(self, direcao):
+        sel = self.tree_ordem_cat.selection()
+        if not sel: return
+        idx = self.tree_ordem_cat.index(sel[0])
+        novo_idx = idx + direcao
+        if 0 <= novo_idx < len(self.tree_ordem_cat.get_children()):
+            self.tree_ordem_cat.move(sel[0], "", novo_idx)
+
+    def salvar_ordem_categorias_db(self):
+        for i, item_id in enumerate(self.tree_ordem_cat.get_children()):
+            nome = self.tree_ordem_cat.item(item_id)['values'][0]
+            self.cursor.execute("UPDATE categorias SET ordem = ? WHERE nome = ?", (i, nome))
+        self.db.commit()
 
     def abrir_config_impressora(self):
         pop = ctk.CTkToplevel(self)
@@ -1662,7 +1786,7 @@ class GestorDelivery(ctk.CTk):
                 'tam_cabecalho': str(self.tam_cabecalho),
                 'tam_endereco': str(self.tam_endereco),
                 'tam_itens': str(self.tam_itens),
-                'tam_valores': str(self.tam_valores)
+                'tam_valores': str(self.tam_valores),
             }
             
             for chave, valor in configs.items():
@@ -1670,6 +1794,7 @@ class GestorDelivery(ctk.CTk):
             
             self.db.commit()
             
+            self.salvar_ordem_categorias_db()
             # Atualiza variáveis locais
             self.nome_empresa = configs['nome_empresa']
             self.fone_empresa = configs['fone_empresa']
@@ -1692,6 +1817,198 @@ class GestorDelivery(ctk.CTk):
                 messagebox.showinfo("Sucesso", "Histórico antigo removido!")
             except Exception as e:
                 print(e)
+
+    def obter_ip_local(self):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except:
+            return "127.0.0.1"
+
+    def rodar_servidor_web(self):
+        app_web = Flask(__name__)
+
+        # Silenciar logs do Flask para focar nos logs dos túneis
+        log = logging.getLogger('werkzeug')
+        log.setLevel(logging.ERROR)
+
+        @app_web.route('/logo')
+        def get_logo():
+            if self.logo_path and os.path.exists(self.logo_path):
+                return send_file(self.logo_path)
+            return "", 404
+
+        @app_web.route('/api/menu')
+        def api_menu():
+            cat_selecionada = request.args.get('cat', 'TODOS')
+            page = int(request.args.get('page', 1))
+            per_page = 20
+            offset = (page - 1) * per_page
+
+            conn = sqlite3.connect("delivery.db")
+            cursor = conn.cursor()
+            
+            # Busca categorias válidas respeitando a ordem definida nas configurações
+            cursor.execute("""SELECT DISTINCT c.nome FROM categorias c 
+                              JOIN produtos p ON c.nome = p.categoria 
+                              WHERE p.categoria NOT LIKE '.%' AND p.categoria IS NOT NULL AND p.categoria != '' AND p.visivel_web = 1 
+                              ORDER BY c.ordem, c.nome""")
+            categorias = [r[0] for r in cursor.fetchall()]
+            
+            # Busca produtos visíveis com paginação e lógica de ordenação por dígitos
+            query = "SELECT id_produto, nome, preco, ingredientes FROM produtos WHERE categoria NOT LIKE '.%' AND categoria IS NOT NULL AND categoria != '' AND visivel_web = 1"
+            params = []
+            if cat_selecionada != 'TODOS':
+                query += " AND categoria = ?"
+                params.append(cat_selecionada)
+
+            query += " ORDER BY (id_produto >= 100), CASE WHEN id_produto < 100 THEN id_produto ELSE 0 END, nome LIMIT ? OFFSET ?"
+            params.extend([per_page, offset])
+            
+            cursor.execute(query, params)
+            produtos = cursor.fetchall()
+
+            # Verifica se existe próxima página
+            cursor.execute(f"SELECT COUNT(*) FROM produtos WHERE categoria NOT LIKE '.%' AND categoria IS NOT NULL AND categoria != '' AND visivel_web = 1 " + 
+                          ("AND categoria = ?" if cat_selecionada != 'TODOS' else ""), 
+                          [cat_selecionada] if cat_selecionada != 'TODOS' else [])
+            total = cursor.fetchone()[0]
+            
+            conn.close()
+            return jsonify({
+                "categorias": categorias,
+                "produtos": produtos,
+                "has_next": (offset + per_page) < total
+            })
+
+        @app_web.route('/')
+        def index():
+            return render_template_string("""
+            <!DOCTYPE html>
+            <html lang="pt-br">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+                <title>{{ nome }}</title>
+                <script src="https://cdn.tailwindcss.com"></script>
+                <style>
+                    .bg-primary { background-color: #c0392b; }
+                    .text-primary { color: #c0392b; }
+                    .cat-scroll::-webkit-scrollbar { display: none; }
+                    .dots-leader { flex-grow: 1; border-bottom: 2px dotted #ccc; margin: 0 5px; height: 14px; }
+                </style>
+            </head>
+            <body class="bg-white pb-2 text-slate-800">
+                <!-- Header -->
+                <header class="bg-primary text-white p-3 flex items-center gap-3 shadow-md">
+                    <img src="/logo" class="w-10 h-10 rounded-full bg-white object-cover border border-white" onerror="this.style.display='none'">
+                    <div>
+                        <h1 class="text-lg font-bold leading-tight">{{ nome }}</h1>
+                        <p class="text-xs opacity-80">{{ fone }}</p>
+                        <p class="text-xs opacity-80">{{ end }}</p>
+                    </div>
+                </header>
+
+                <!-- Categorias (Scroll Horizontal) -->
+                <div id="categorias" class="flex overflow-x-auto p-2 gap-1.5 cat-scroll sticky top-0 bg-white/95 backdrop-blur-sm z-10 border-b">
+                    <button onclick="setCategory('TODOS')" class="cat-btn bg-primary text-white px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap border border-primary">TODOS</button>
+                </div>
+
+                <!-- Lista de Produtos -->
+                <main id="menu" class="px-3 py-1 space-y-2"></main>
+
+                <!-- Paginação -->
+                <div class="flex justify-center items-center gap-3 mt-2">
+                    <button id="btn-prev" onclick="changePage(-1)" class="bg-white border px-3 py-1 rounded font-bold text-xs disabled:opacity-30">Anterior</button>
+                    <span id="page-num" class="text-xs font-bold text-gray-400">1</span>
+                    <button id="btn-next" onclick="changePage(1)" class="bg-white border px-3 py-1 rounded font-bold text-xs disabled:opacity-30">Próximo</button>
+                </div>
+
+                <script>
+                    let currentCat = 'TODOS';
+                    let currentPage = 1;
+
+                    async function loadMenu() {
+                        const res = await fetch(`/api/menu?cat=${currentCat}&page=${currentPage}`);
+                        const data = await res.json();
+                        
+                        renderCategories(data.categorias);
+                        renderProducts(data.produtos);
+                        
+                        document.getElementById('page-num').innerText = currentPage;
+                        document.getElementById('btn-prev').disabled = currentPage === 1;
+                        document.getElementById('btn-next').disabled = !data.has_next;
+                    }
+
+                    function renderCategories(cats) {
+                        const catDiv = document.getElementById('categorias');
+                        if(catDiv.children.length > 1) return; // Evita duplicar botões
+                        cats.forEach(cat => {
+                            catDiv.innerHTML += `<button onclick="setCategory('${cat}')" class="cat-btn bg-white text-black px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap border">${cat}</button>`;
+                        });
+                    }
+
+                    function renderProducts(prods) {
+                        const menuDiv = document.getElementById('menu');
+                        menuDiv.innerHTML = prods.length ? '' : '<p class="text-center text-gray-400 py-10">Nenhum item nesta página.</p>';
+                        
+                        prods.forEach(p => { 
+                            const idRaw = p[0];
+                            const nome = p[1];
+                            const preco = p[2].toFixed(2);
+                            const ingredientes = p[3] ? `(${p[3]})` : '';
+                            
+                            const idDisplay = idRaw < 100 ? idRaw.toString().padStart(2, '0') + '. ' : '';
+                            
+                            let itemHtml = `<div class="flex flex-col border-b border-gray-50 pb-1">`;
+                            itemHtml += `<div class="flex justify-between items-end">`;
+                            itemHtml += `<span class="text-sm font-bold text-gray-800">${idDisplay}${nome}</span>`;
+                            if (!ingredientes) {
+                                itemHtml += `<div class="dots-leader"></div><span class="text-sm font-bold text-primary">R$ ${preco}</span>`;
+                            }
+                            itemHtml += `</div>`;
+                            if (ingredientes) {
+                                itemHtml += `<div class="flex justify-between items-end text-xs text-gray-500 italic"><span>${ingredientes}</span><div class="dots-leader"></div><span class="text-sm font-bold text-primary">R$ ${preco}</span></div>`;
+                            }
+                            itemHtml += `</div>`;
+                            menuDiv.innerHTML += itemHtml;
+                        });
+                    }
+
+                    function setCategory(cat) {
+                        currentCat = cat;
+                        currentPage = 1;
+                        loadMenu();
+                        
+                        // Efeito visual no botão selecionado
+                        document.querySelectorAll('.cat-btn').forEach(btn => {
+                            if(btn.innerText === cat) {
+                                btn.classList.add('bg-primary', 'text-white');
+                                btn.classList.remove('bg-white', 'text-black');
+                            } else {
+                                btn.classList.remove('bg-primary', 'text-white');
+                                btn.classList.add('bg-white', 'text-black');
+                            }
+                        });
+                    }
+
+                    function changePage(step) {
+                        currentPage += step;
+                        loadMenu();
+                        window.scrollTo({top: 0, behavior: 'smooth'});
+                    }
+
+                    loadMenu();
+                </script>
+            </body>
+            </html>
+            """, nome=self.nome_empresa, fone=self.fone_empresa, end=self.end_empresa)
+
+        print("[FLASK] Iniciando servidor local na porta 5000...")
+        app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     app = GestorDelivery()
