@@ -49,14 +49,12 @@ class Theme:
     FONT_LABEL = ("Arial", 11, "bold")
 
 class GestorDelivery(ctk.CTk):
+    # Cache do path base para evitar recálculos constantes
+    _base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+
     def resource_path(self, relative_path):
         """ Retorna o caminho absoluto para recursos, funcionando em modo dev e após compilar """
-        try:
-            # PyInstaller cria uma pasta temporária e armazena o caminho em _MEIPASS
-            base_path = sys._MEIPASS
-        except Exception:
-            base_path = os.path.abspath(".")
-        return os.path.join(base_path, relative_path)
+        return os.path.join(self._base_path, relative_path)
 
     def __init__(self):
         super().__init__()
@@ -68,7 +66,7 @@ class GestorDelivery(ctk.CTk):
         except Exception:
             pass
 
-        # Define o ícone da janela (título)
+        # Configuração visual imediata
         icon_path = self.resource_path("icon.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
@@ -79,6 +77,8 @@ class GestorDelivery(ctk.CTk):
         self.ip_local = self.obter_ip_local()
         self.url_publica = None
         self.tipo_historico_atual = "ENTREGA"
+        self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'VEXGestor')
+        self.db = None
         self.impressora_selecionada = None # Armazena a impressora configurada
         self.bloquear_bairro_desconhecido = True
 
@@ -91,10 +91,6 @@ class GestorDelivery(ctk.CTk):
         self.atalhos_usuario = {} # Carregado do Banco
         self.atalhos_binds = []   # Armazena os binds ativos para limpeza
         
-        # Iniciar Servidor do Cardápio Digital (Flask)
-        if Flask:
-            threading.Thread(target=self.rodar_servidor_web, daemon=True).start()
-
         # Configurações Padrão
         self.nome_empresa = "MINHA EMPRESA"
         self.fone_empresa = "(00) 0000-0000"
@@ -109,7 +105,7 @@ class GestorDelivery(ctk.CTk):
         self.tam_valores = 2   # Índice 2 = Médio (9pt)
 
         self.editando_id_pedido = None
-        self.title("VEX - Gestor de Comandas")
+        self.title("VEX - Gestor de Comandas [Carregando...]")
 
         # Configuração de Janela: Centralizar e Iniciar Maximizada
         largura_tela = self.winfo_screenwidth()
@@ -131,15 +127,42 @@ class GestorDelivery(ctk.CTk):
         self.bind("<Left>", self.navegar_teclado)
         self.bind("<Right>", self.navegar_teclado)
 
-        # Conexão com o Banco de Dados
-        try:
-            self.db = sqlite3.connect("delivery.db", check_same_thread=False)
-            self.cursor = self.db.cursor()
-            self.criar_tabelas()
+        # Layout Base Inicial (Sidebar aparece rápido)
+        self.criar_sidebar()
+        self.container = ctk.CTkFrame(self, fg_color="white")
+        self.container.pack(side="left", fill="both", expand=True)
 
+        # Inicia a carga pesada logo após a janela ser exibida
+        self.after(100, self.inicializar_sistema_deferred)
+
+    def inicializar_sistema_deferred(self):
+        # Define o padrão AppData, que pode ser sobrescrito pelo banco local (bootstrap)
+        self.data_dir = self.app_data_base_path
+        """Executa as tarefas pesadas após a UI inicial aparecer"""
+        
+        try:
+            # 1. Tenta descobrir se há um caminho customizado no banco local
+            # Isso é necessário caso o programa mude de pasta mas queira manter o data_dir anterior
+            if os.path.exists("delivery.db"):
+                try:
+                    bootstrap_conn = sqlite3.connect("delivery.db")
+                    b_cursor = bootstrap_conn.cursor()
+                    b_cursor.execute("SELECT valor FROM config WHERE chave = 'data_dir'")
+                    res = b_cursor.fetchone()
+                    if res: self.data_dir = res[0]
+                    bootstrap_conn.close()
+                except: pass
+
+            # 2. Conecta ao banco definitivo
+            os.makedirs(self.data_dir, exist_ok=True)
+            self.db = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"), check_same_thread=False)
+            self.cursor = self.db.cursor()
+            
+            # 3. Cria as tabelas e configura estilos
+            self.criar_tabelas()
             self.configurar_estilos_globais()
 
-            # Atualização de Schema: Adicionar novas colunas se não existirem
+            # 4. Migrações e Atualização de Schema
             self.cursor.execute("PRAGMA table_info(produtos)")
             colunas = [col[1] for col in self.cursor.fetchall()]
             if 'categoria' not in colunas:
@@ -154,7 +177,7 @@ class GestorDelivery(ctk.CTk):
                 self.cursor.execute("ALTER TABLE categorias ADD COLUMN ordem INTEGER DEFAULT 0")
             self.db.commit()
 
-            # Carrega configurações do banco
+            # 5. Carrega configurações do banco real
             self.cursor.execute("SELECT chave, valor FROM config")
             for chave, valor in self.cursor.fetchall():
                 if chave == 'impressora_selecionada': self.impressora_selecionada = valor
@@ -167,10 +190,10 @@ class GestorDelivery(ctk.CTk):
                 elif chave == 'tam_endereco': self.tam_endereco = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_itens': self.tam_itens = int(valor) if valor.isdigit() else 2
                 elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
+                elif chave == 'data_dir': self.data_dir = valor
                 elif chave == 'bloquear_bairro': self.bloquear_bairro_desconhecido = (valor == 'True')
                 elif chave == 'logo_path':
                     if os.path.exists(valor): self.logo_path = valor
-                # Carregar atalhos: formato atalho_TELA_FUNCAO
                 elif chave.startswith("atalho_"):
                     partes = chave.split("_")
                     if len(partes) == 3:
@@ -178,14 +201,14 @@ class GestorDelivery(ctk.CTk):
             
         except Exception as e:
             print(f"Erro ao conectar banco: {e}")
-            self.db = None
-            
-        # Layout Base
-        self.criar_sidebar()
-        self.container = ctk.CTkFrame(self, fg_color="white")
-        self.container.pack(side="left", fill="both", expand=True)
+        if Flask and self.db: # Inicia o Flask apenas se o DB foi conectado com sucesso
+            threading.Thread(target=self.rodar_servidor_web, daemon=True).start()
 
+        # Atualiza o título e entra na tela principal
+        self.title("VEX - Gestor de Comandas")
         self.mostrar_tela_delivery()
+        if self.logo_path:
+            self.atualizar_imagem_logo()
 
     def obter_atalho(self, tela, funcao):
         """Retorna o atalho configurado ou o padrão"""
@@ -315,7 +338,7 @@ class GestorDelivery(ctk.CTk):
         self.db.commit()
         
     def criar_sidebar(self):
-        """Cria a barra lateral de navegação persistente"""
+        """Cria a barra lateral de navegação persistente (chamado apenas uma vez no __init__)"""
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0, fg_color=Theme.PRIMARY)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False) # Impede que o conteúdo interno mude a largura
@@ -361,7 +384,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.5-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.6-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do WebApp na Sidebar
@@ -400,7 +423,7 @@ class GestorDelivery(ctk.CTk):
         origem = filedialog.askopenfilename(filetypes=[("Imagens", "*.png *.jpg *.jpeg *.bmp")])
         if origem:
             # 1. Garantir que a pasta de assets existe
-            pasta_assets = "assets"
+            pasta_assets = os.path.join(self.data_dir, "assets")
             if not os.path.exists(pasta_assets):
                 os.makedirs(pasta_assets)
 
@@ -1354,18 +1377,6 @@ class GestorDelivery(ctk.CTk):
             self.db.commit()
             self.atualizar_lista_pedidos()
 
-    def limpar_historico_antigo(self):
-        if messagebox.askyesno("Atenção", "Deseja excluir TODOS os pedidos de dias anteriores?"):
-            try:
-                # Deleta itens primeiro por causa da FK
-                self.cursor.execute("DELETE FROM itens_pedido WHERE id_pedido IN (SELECT id_pedido FROM pedidos WHERE DATE(data_pedido, 'localtime') < DATE('now', 'localtime'))")
-                self.cursor.execute("DELETE FROM pedidos WHERE DATE(data_pedido, 'localtime') < DATE('now', 'localtime')")
-                self.db.commit()
-                self.atualizar_lista_pedidos()
-                messagebox.showinfo("Sucesso", "Histórico antigo removido!")
-            except Exception as e:
-                print(e)
-
     def criar_campo(self, master, texto, row, col, colspan=1):
         frame = ctk.CTkFrame(master, fg_color="transparent")
         frame.grid(row=row, column=col, columnspan=colspan, padx=10, pady=5, sticky="ew")
@@ -1770,6 +1781,17 @@ class GestorDelivery(ctk.CTk):
         self.ent_conf_end = self.criar_campo(frame_empresa, "Endereço Completo", 2, 0, colspan=2)
         self.ent_conf_end.insert(0, self.end_empresa)
 
+        # --- SEÇÃO 1.1: CAMINHO DOS DADOS ---
+        frame_data_path = self.criar_card_container("🗄️ CAMINHO DOS DADOS", parent=self.scroll_config)
+        frame_data_path.grid_columnconfigure(0, weight=1)
+        
+        self.ent_data_dir = self.criar_campo(frame_data_path, "Pasta de Dados (Banco e Imagens):", 1, 0)
+        self.ent_data_dir.insert(0, self.data_dir)
+        self.ent_data_dir.configure(state="readonly") # Apenas leitura, para alterar use o botão
+        
+        ctk.CTkButton(frame_data_path, text="Procurar Pasta", command=self.browse_data_dir).grid(row=1, column=1, padx=5, pady=5, sticky="w")
+        ctk.CTkLabel(frame_data_path, text="Atenção: Mudar esta pasta requer reiniciar o programa e mover os arquivos manualmente.", font=("Arial", 10, "italic")).grid(row=2, column=0, columnspan=2, padx=15, pady=5, sticky="w")
+
         self.var_bloquear_bairro = tk.BooleanVar(value=self.bloquear_bairro_desconhecido)
         self.cb_bloquear_bairro = ctk.CTkSwitch(frame_empresa, text="Bloquear bairros não cadastrados", variable=self.var_bloquear_bairro, font=Theme.FONT_LABEL)
         self.cb_bloquear_bairro.grid(row=3, column=0, columnspan=2, padx=15, pady=10, sticky="w")
@@ -1973,6 +1995,19 @@ class GestorDelivery(ctk.CTk):
             self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores = old_largura, old_cab, old_end, old_itm, old_val
 
     def salvar_todas_configs(self):
+        old_data_dir = self.data_dir
+        new_data_dir = self.ent_data_dir.get()
+
+        data_dir_changed = (old_data_dir != new_data_dir)
+        mover = False
+        if data_dir_changed:
+            mover = messagebox.askyesno("Mudar Pasta de Dados", 
+                                        f"Deseja mover os arquivos de dados existentes para a nova pasta?\n\n"
+                                        f"De: {old_data_dir}\n"
+                                        f"Para: {new_data_dir}\n\n"
+                                        "Sim: Move o banco de dados e imagens atuais.\n"
+                                        "Não: Cria um novo banco de dados vazio na nova pasta.")
+
         try:
             configs = {
                 'nome_empresa': self.ent_conf_nome.get(),
@@ -1986,6 +2021,7 @@ class GestorDelivery(ctk.CTk):
                 'tam_itens': str(self.tam_itens),
                 'tam_valores': str(self.tam_valores),
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
+                'data_dir': new_data_dir,
             }
             
             # Salvar Atalhos e Validar duplicatas na mesma tela
@@ -2003,11 +2039,59 @@ class GestorDelivery(ctk.CTk):
                     chave_db = f"atalho_{tela}_{func}"
                     configs[chave_db] = valor
 
-            for chave, valor in configs.items():
-                self.cursor.execute("INSERT OR REPLACE INTO config (chave, valor) VALUES (?, ?)", (chave, valor))
-            
-            self.db.commit()
-            
+            if not data_dir_changed:
+                # Se o caminho não mudou, apenas salva no banco atual
+                for chave, valor in configs.items():
+                    self.cursor.execute("INSERT OR REPLACE INTO config (chave, valor) VALUES (?, ?)", (chave, valor))
+                self.db.commit()
+            else:
+                # Se mudou, precisamos trocar a conexão de forma segura
+                if self.db:
+                    self.db.close()
+                    self.db = None
+                
+                if mover:
+                    try:
+                        os.makedirs(new_data_dir, exist_ok=True)
+                        # Migração do Banco de Dados
+                        db_origem = os.path.join(old_data_dir, "delivery.db")
+                        db_destino = os.path.join(new_data_dir, "delivery.db")
+                        if os.path.exists(db_origem):
+                            if os.path.exists(db_destino): os.remove(db_destino)
+                            shutil.move(db_origem, db_destino)
+                        
+                        # Migração dos Assets (Logo)
+                        assets_origem = os.path.join(old_data_dir, "assets")
+                        assets_destino = os.path.join(new_data_dir, "assets")
+                        if os.path.exists(assets_origem):
+                            if os.path.exists(assets_destino):
+                                for f in os.listdir(assets_origem):
+                                    shutil.move(os.path.join(assets_origem, f), os.path.join(assets_destino, f))
+                                os.rmdir(assets_origem)
+                            else:
+                                shutil.move(assets_origem, assets_destino)
+                        
+                        # Atualiza o caminho da logo em memória
+                        if self.logo_path:
+                            self.logo_path = self.logo_path.replace(old_data_dir, new_data_dir)
+                            configs['logo_path'] = self.logo_path
+                    except Exception as e:
+                        messagebox.showerror("Erro na Migração", f"Erro ao mover arquivos: {e}")
+
+                # Atualiza a variável de diretório e reconecta
+                self.data_dir = new_data_dir
+                os.makedirs(self.data_dir, exist_ok=True)
+                self.db = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"), check_same_thread=False)
+                self.cursor = self.db.cursor()
+
+                if not mover:
+                    self.criar_tabelas() # Cria estrutura se for banco novo
+                
+                # Persiste as configurações atuais no novo banco de dados
+                for chave, valor in configs.items():
+                    self.cursor.execute("INSERT OR REPLACE INTO config (chave, valor) VALUES (?, ?)", (chave, valor))
+                self.db.commit()
+
             self.salvar_ordem_categorias_db()
             # Atualiza variáveis locais
             self.nome_empresa = configs['nome_empresa']
@@ -2022,13 +2106,18 @@ class GestorDelivery(ctk.CTk):
                 if k.startswith("atalho_"):
                     p = k.split("_")
                     self.atalhos_usuario.setdefault(p[1], {})[p[2]] = v
-
+            
             messagebox.showinfo("Sucesso", "Configurações aplicadas!")
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar: {e}")
 
     def limpar_historico_antigo(self):
         if messagebox.askyesno("Atenção", "Deseja excluir TODOS os pedidos de dias anteriores?"):
+            if not self.db:
+                messagebox.showerror("Erro", "Banco de dados não conectado.")
+                return
+            if not self.cursor:
+                messagebox.showerror("Erro", "Cursor do banco de dados não disponível.")
             try:
                 # Deleta itens primeiro por causa da FK
                 self.cursor.execute("DELETE FROM itens_pedido WHERE id_pedido IN (SELECT id_pedido FROM pedidos WHERE DATE(data_pedido, 'localtime') < DATE('now', 'localtime'))")
@@ -2049,6 +2138,11 @@ class GestorDelivery(ctk.CTk):
         except:
             return "127.0.0.1"
 
+    def browse_data_dir(self):
+        new_dir = filedialog.askdirectory(initialdir=self.data_dir)
+        if new_dir:
+            self.ent_data_dir.configure(state="normal"); self.ent_data_dir.delete(0, 'end'); self.ent_data_dir.insert(0, new_dir); self.ent_data_dir.configure(state="readonly")
+
     def rodar_servidor_web(self):
         app_web = Flask(__name__)
 
@@ -2068,8 +2162,8 @@ class GestorDelivery(ctk.CTk):
             page = int(request.args.get('page', 1))
             per_page = 20
             offset = (page - 1) * per_page
-
-            conn = sqlite3.connect("delivery.db")
+            
+            conn = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"))
             cursor = conn.cursor()
             
             # Busca categorias válidas respeitando a ordem definida nas configurações
