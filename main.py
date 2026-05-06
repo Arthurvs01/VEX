@@ -76,6 +76,7 @@ class GestorDelivery(ctk.CTk):
         self.taxa_atual = 0.0
         self.ip_local = self.obter_ip_local()
         self.url_publica = None
+        self.tipo_numeracao = "SEQUENCIAL"
         self.tipo_historico_atual = "ENTREGA"
         self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'VEXGestor')
         self.db = None
@@ -84,7 +85,7 @@ class GestorDelivery(ctk.CTk):
 
         # --- CONFIGURAÇÃO DE ATALHOS PADRÃO ---
         self.atalhos_default = {
-            "Delivery": {"Finalizar": "F1", "Consulta": "F5", "Limpar": "F6"},
+            "Delivery": {"Finalizar": "F1", "Consulta": "F5", "Limpar": "F6", "Editar Item": "F2", "Excluir Item": "Delete"},
             "Histórico": {"Visualizar": "F1", "Editar": "F2", "Reimprimir": "F3", "Excluir": "Delete"},
             "Cardápio": {"Salvar": "F2", "Limpar": "F3", "Excluir": "Delete"}
         }
@@ -175,6 +176,21 @@ class GestorDelivery(ctk.CTk):
             self.cursor.execute("PRAGMA table_info(categorias)")
             if 'ordem' not in [col[1] for col in self.cursor.fetchall()]:
                 self.cursor.execute("ALTER TABLE categorias ADD COLUMN ordem INTEGER DEFAULT 0")
+
+            self.cursor.execute("PRAGMA table_info(pedidos)")
+            colunas_p = [col[1] for col in self.cursor.fetchall()]
+            if 'num_dia' not in colunas_p:
+                self.cursor.execute("ALTER TABLE pedidos ADD COLUMN num_dia INTEGER")
+                # Backfill (bake numbers as they are currently seen)
+                self.cursor.execute("SELECT id_pedido, DATE(data_pedido, 'localtime'), tipo FROM pedidos ORDER BY id_pedido ASC")
+                all_p = self.cursor.fetchall()
+                counters = {}
+                for pid, dt_p, tp_p in all_p:
+                    k = (dt_p, tp_p)
+                    counters[k] = counters.get(k, 0) + 1
+                    self.cursor.execute("UPDATE pedidos SET num_dia = ? WHERE id_pedido = ?", (counters[k], pid))
+                self.db.commit()
+
             self.db.commit()
 
             # 5. Carrega configurações do banco real
@@ -192,6 +208,7 @@ class GestorDelivery(ctk.CTk):
                 elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
                 elif chave == 'data_dir': self.data_dir = valor
                 elif chave == 'bloquear_bairro': self.bloquear_bairro_desconhecido = (valor == 'True')
+                elif chave == 'tipo_numeracao': self.tipo_numeracao = valor
                 elif chave == 'logo_path':
                     if os.path.exists(valor): self.logo_path = valor
                 elif chave.startswith("atalho_"):
@@ -231,6 +248,8 @@ class GestorDelivery(ctk.CTk):
                     if funcao == "Finalizar": cmd = lambda e: self.finalizar_pedido()
                     elif funcao == "Consulta": cmd = lambda e: self.abrir_consulta_precos()
                     elif funcao == "Limpar": cmd = lambda e: self.limpar_tela_delivery()
+                    elif funcao == "Editar Item": cmd = lambda e: self.editar_item_carrinho()
+                    elif funcao == "Excluir Item": cmd = lambda e: self.excluir_item_carrinho()
                 elif tela == "Histórico":
                     if funcao == "Visualizar": cmd = lambda e: self.visualizar_comanda_estatisticas(None)
                     elif funcao == "Editar": cmd = lambda e: self.editar_pedido_estatisticas()
@@ -321,6 +340,7 @@ class GestorDelivery(ctk.CTk):
                 forma_pagamento TEXT,
                 tipo TEXT DEFAULT 'ENTREGA',
                 troco REAL,
+                num_dia INTEGER,
                 data_pedido TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )""",
             """CREATE TABLE IF NOT EXISTS itens_pedido (
@@ -384,7 +404,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.6-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.7-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do WebApp na Sidebar
@@ -519,22 +539,30 @@ class GestorDelivery(ctk.CTk):
         self.frame_total = ctk.CTkFrame(self.container, height=100, fg_color="transparent")
         self.frame_total.pack(fill="x", side="bottom", padx=20, pady=10)
 
-        self.lbl_total = ctk.CTkLabel(self.frame_total, text="TOTAL: R$ 0,00", font=("Arial", 35, "bold"), text_color=Theme.PRIMARY)
-        self.lbl_total.pack(side="right", padx=30)
+        self.lbl_total = ctk.CTkLabel(self.frame_total, text="TOTAL: R$ 0,00", font=("Arial", 28, "bold"), text_color=Theme.PRIMARY)
+        self.lbl_total.pack(side="right", padx=20)
 
         self.btn_finalizar = ctk.CTkButton(self.frame_total, text=f"🚀 FINALIZAR ({self.obter_atalho('Delivery', 'Finalizar')})", 
-                                           fg_color=Theme.SUCCESS, hover_color="#219150", height=55, 
-                                           font=("Arial", 18, "bold"), command=self.finalizar_pedido)
-        self.btn_finalizar.pack(side="left", padx=10)
+                                           fg_color=Theme.SUCCESS, hover_color="#219150", height=45, 
+                                           font=("Arial", 15, "bold"), command=self.finalizar_pedido)
+        self.btn_finalizar.pack(side="left", padx=5)
 
         self.btn_consultar = ctk.CTkButton(self.frame_total, text=f"🔍 CONSULTA ({self.obter_atalho('Delivery', 'Consulta')})", 
-                                           fg_color="#34495e", height=55, 
-                                           font=("Arial", 18, "bold"), command=self.abrir_consulta_precos)
-        self.btn_consultar.pack(side="left", padx=10)
+                                           fg_color="#34495e", height=45, 
+                                           font=("Arial", 15, "bold"), command=self.abrir_consulta_precos)
+        self.btn_consultar.pack(side="left", padx=5)
         
+        self.btn_editar_item = ctk.CTkButton(self.frame_total, text=f"📝 EDITAR ({self.obter_atalho('Delivery', 'Editar Item')})", 
+                                             fg_color="#2980b9", height=45, font=("Arial", 12, "bold"), command=self.editar_item_carrinho)
+        self.btn_editar_item.pack(side="left", padx=5)
+
+        self.btn_excluir_item = ctk.CTkButton(self.frame_total, text=f"❌ EXCLUIR ({self.obter_atalho('Delivery', 'Excluir Item')})", 
+                                              fg_color="#e74c3c", height=45, font=("Arial", 12, "bold"), command=self.excluir_item_carrinho)
+        self.btn_excluir_item.pack(side="left", padx=5)
+
         # Botão Cancelar
-        ctk.CTkButton(self.frame_total, text=f"LIMPAR ({self.obter_atalho('Delivery', 'Limpar')})", fg_color="gray", height=55, width=120,
-                      font=("Arial", 14, "bold"), command=self.limpar_tela_delivery).pack(side="left", padx=10)
+        ctk.CTkButton(self.frame_total, text=f"LIMPAR ({self.obter_atalho('Delivery', 'Limpar')})", fg_color="gray", height=45, width=100,
+                      font=("Arial", 12, "bold"), command=self.limpar_tela_delivery).pack(side="left", padx=5)
 
         # --- ÁREA DO CLIENTE ---
         self.frame_cliente = self.criar_card_container("📍 DADOS DO CLIENTE")
@@ -717,10 +745,10 @@ class GestorDelivery(ctk.CTk):
     def mostrar_menu_contexto(self, event):
         item = self.tree.identify_row(event.y)
         if item:
-            self.tree.selection_set(item)
             menu = tk.Menu(self, tearoff=0)
             menu.add_command(label="📝 Editar Item", command=self.editar_item_carrinho)
             menu.add_command(label="❌ Excluir Item", command=self.excluir_item_carrinho)
+            self.tree.selection_set(item)
             menu.post(event.x_root, event.y_root)
 
     def organizar_zebra_carrinho(self):
@@ -728,7 +756,7 @@ class GestorDelivery(ctk.CTk):
             tag = 'evenrow' if i % 2 == 0 else 'oddrow'
             self.tree.item(item, tags=(tag,))
 
-    def excluir_item_carrinho(self):
+    def excluir_item_carrinho(self, event=None):
         sel = self.tree.selection()
         if sel:
             for i in sel:
@@ -736,7 +764,7 @@ class GestorDelivery(ctk.CTk):
             self.atualizar_total()
             self.organizar_zebra_carrinho()
 
-    def editar_item_carrinho(self):
+    def editar_item_carrinho(self, event=None):
         sel = self.tree.selection()
         if sel:
             item = sel[0]
@@ -795,27 +823,32 @@ class GestorDelivery(ctk.CTk):
         # --- BOTÕES DE AÇÃO ---
         self.frame_acoes_prod = ctk.CTkFrame(self.container, fg_color="transparent")
         self.frame_acoes_prod.pack(pady=10, padx=20, fill="x")
+        self.frame_acoes_prod.grid_columnconfigure(3, weight=1) # Empurra o filtro e o excluir para as pontas
 
         self.btn_salvar_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"SALVAR ({self.obter_atalho('Cardápio', 'Salvar')})", fg_color="#27ae60", hover_color="#219150", 
                                              font=("Arial", 13, "bold"), command=self.salvar_produto_db)
-        self.btn_salvar_prod.pack(side="left", padx=5)
+        self.btn_salvar_prod.grid(row=0, column=0, padx=5)
+
+        self.btn_massa_prod = ctk.CTkButton(self.frame_acoes_prod, text="📦 EDIÇÃO EM MASSA", fg_color="#34495e", 
+                                             font=("Arial", 13, "bold"), command=self.abrir_edicao_em_massa)
+        self.btn_massa_prod.grid(row=0, column=1, padx=5)
 
         self.btn_limpar_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"LIMPAR ({self.obter_atalho('Cardápio', 'Limpar')})", fg_color="gray", 
                                              font=("Arial", 13, "bold"), command=self.limpar_campos_cardapio)
-        self.btn_limpar_prod.pack(side="left", padx=5)
+        self.btn_limpar_prod.grid(row=0, column=2, padx=5)
 
         self.btn_excluir_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"EXCLUIR ({self.obter_atalho('Cardápio', 'Excluir')})", fg_color="#e74c3c", hover_color="#c0392b", 
                                               font=("Arial", 13, "bold"), command=self.excluir_produto_db)
-        self.btn_excluir_prod.pack(side="right", padx=5)
+        self.btn_excluir_prod.grid(row=0, column=6, padx=5)
 
-        ctk.CTkLabel(self.frame_acoes_prod, text="🔍 Filtrar:", font=("Arial", 12, "bold")).pack(side="right", padx=5)
+        ctk.CTkLabel(self.frame_acoes_prod, text="🔍 Filtrar:", font=("Arial", 12, "bold")).grid(row=0, column=4, padx=5)
         self.cb_filtro_cat = ctk.CTkComboBox(self.frame_acoes_prod, values=["TODOS"], command=lambda _: self.atualizar_lista_produtos())
-        self.cb_filtro_cat.pack(side="right", padx=5)
+        self.cb_filtro_cat.grid(row=0, column=5, padx=5)
         self.cb_filtro_cat.set("TODOS")
 
         # --- TABELA DE PRODUTOS ---
         self.tree_prod = ttk.Treeview(self.container, columns=("ID", "Produto", "Categoria", "Preço"), 
-                                      show="headings", selectmode="browse", style="Treeview")
+                                      show="headings", selectmode="extended", style="Treeview")
         self.tree_prod.heading("ID", text="ID ↕", command=lambda: self.ordenar_coluna_cardapio("ID", False))
         self.tree_prod.heading("Produto", text="Nome do Produto ↕", command=lambda: self.ordenar_coluna_cardapio("Produto", False))
         self.tree_prod.heading("Categoria", text="Categoria ↕", command=lambda: self.ordenar_coluna_cardapio("Categoria", False))
@@ -833,6 +866,69 @@ class GestorDelivery(ctk.CTk):
         self.tree_prod.bind("<<TreeviewSelect>>", self.preencher_campos_cardapio)
 
         self.atualizar_lista_produtos()
+
+    def abrir_edicao_em_massa(self):
+        selecionados = self.tree_prod.selection()
+        if len(selecionados) < 2:
+            messagebox.showwarning("Aviso", "Selecione pelo menos dois produtos para edição em massa.")
+            return
+
+        pop = ctk.CTkToplevel(self)
+        pop.title("Edição em Massa")
+        pop.geometry("400x350")
+        pop.grab_set()
+        pop.attributes("-topmost", True)
+
+        main_f = ctk.CTkFrame(pop, fg_color="white")
+        main_f.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(main_f, text=f"Editando {len(selecionados)} produtos", font=("Arial", 14, "bold")).pack(pady=10)
+
+        ctk.CTkLabel(main_f, text="Nova Categoria (vazio para manter):", font=Theme.FONT_LABEL).pack(anchor="w", pady=(10, 0))
+        ent_cat = ctk.CTkEntry(main_f)
+        ent_cat.pack(fill="x", pady=5)
+
+        ctk.CTkLabel(main_f, text="Novo Preço (vazio para manter):", font=Theme.FONT_LABEL).pack(anchor="w", pady=(10, 0))
+        ent_preco = ctk.CTkEntry(main_f)
+        ent_preco.pack(fill="x", pady=5)
+
+        def aplicar_massa():
+            nova_cat = ent_cat.get().strip()
+            novo_preco = ent_preco.get().strip().replace(",", ".")
+            
+            updates = []
+            params = []
+            if nova_cat:
+                # Garante que a categoria existe na tabela de categorias
+                self.cursor.execute("SELECT id_categoria FROM categorias WHERE nome = ? COLLATE NOCASE", (nova_cat,))
+                if not self.cursor.fetchone():
+                    self.cursor.execute("INSERT INTO categorias (nome) VALUES (?)", (nova_cat,))
+                updates.append("categoria = ?")
+                params.append(nova_cat)
+            
+            if novo_preco:
+                try:
+                    float(novo_preco)
+                    updates.append("preco = ?")
+                    params.append(float(novo_preco))
+                except ValueError:
+                    messagebox.showerror("Erro", "Preço inválido!")
+                    return
+
+            if not updates:
+                pop.destroy()
+                return
+
+            for item_id in selecionados:
+                id_prod = self.tree_prod.item(item_id)['values'][0]
+                self.cursor.execute(f"UPDATE produtos SET {', '.join(updates)} WHERE id_produto = ?", params + [id_prod])
+            
+            self.db.commit()
+            self.atualizar_lista_produtos()
+            pop.destroy()
+            messagebox.showinfo("Sucesso", "Produtos atualizados em massa!")
+
+        ctk.CTkButton(main_f, text="APLICAR MUDANÇAS", fg_color=Theme.SUCCESS, command=aplicar_massa).pack(pady=20, fill="x")
 
     def filtrar_categorias_sugestao(self, event):
         if event.keysym in ["Return", "Up", "Down", "Escape"]: return
@@ -992,7 +1088,7 @@ class GestorDelivery(ctk.CTk):
     def preencher_campos_cardapio(self, event):
         item_sel = self.tree_prod.selection()
         if item_sel:
-            id_p = self.tree_prod.item(item_sel)['values'][0]
+            id_p = self.tree_prod.item(item_sel[0])['values'][0]
             self.cursor.execute("SELECT id_produto, nome, categoria, preco, ingredientes, visivel_web FROM produtos WHERE id_produto = ?", (id_p,))
             res = self.cursor.fetchone()
             if res:
@@ -1207,18 +1303,19 @@ class GestorDelivery(ctk.CTk):
         # --- BARRA DE AÇÕES DO HISTÓRICO ---
         action_bar = ctk.CTkFrame(self.container, fg_color="transparent")
         action_bar.pack(fill="x", padx=20, pady=10)
+        action_bar.grid_columnconfigure(3, weight=1)
 
         btn_view = ctk.CTkButton(action_bar, text=f"👀 Visualizar ({self.obter_atalho('Histórico', 'Visualizar')})", fg_color="#34495e", command=lambda: self.visualizar_comanda_estatisticas(None))
-        btn_view.pack(side="left", padx=5)
+        btn_view.grid(row=0, column=0, padx=5)
 
         btn_edit = ctk.CTkButton(action_bar, text=f"📝 Editar ({self.obter_atalho('Histórico', 'Editar')})", fg_color="#2980b9", command=self.editar_pedido_estatisticas)
-        btn_edit.pack(side="left", padx=5)
+        btn_edit.grid(row=0, column=1, padx=5)
 
         btn_print = ctk.CTkButton(action_bar, text=f"🖨️ Reimprimir ({self.obter_atalho('Histórico', 'Reimprimir')})", fg_color="#27ae60", command=self.reimprimir_pedido_estatisticas)
-        btn_print.pack(side="left", padx=5)
+        btn_print.grid(row=0, column=2, padx=5)
 
         btn_del = ctk.CTkButton(action_bar, text=f"❌ Excluir ({self.obter_atalho('Histórico', 'Excluir')})", fg_color="#e74c3c", command=self.excluir_pedido_estatisticas)
-        btn_del.pack(side="right", padx=5)
+        btn_del.grid(row=0, column=4, padx=5)
         
         # Inicia vazio conforme solicitado ou com o filtro aplicado
         self.atualizar_lista_pedidos()
@@ -1231,7 +1328,7 @@ class GestorDelivery(ctk.CTk):
             data_iso = datetime.strptime(data_input, "%d/%m/%Y").strftime("%Y-%m-%d")
             if self.db:
                 query = """SELECT 
-                           (SELECT COUNT(*) FROM pedidos p2 WHERE DATE(p2.data_pedido, 'localtime') = DATE(p1.data_pedido, 'localtime') AND p2.tipo = p1.tipo AND p2.id_pedido <= p1.id_pedido) as num_dia,
+                           p1.num_dia,
                            c.nome, p1.telefone_cliente, p1.total, p1.data_pedido, p1.id_pedido
                            FROM pedidos p1 JOIN clientes c ON p1.telefone_cliente = c.telefone 
                            WHERE DATE(p1.data_pedido, 'localtime') = ? AND p1.tipo = ? ORDER BY p1.id_pedido DESC"""
@@ -1308,11 +1405,12 @@ class GestorDelivery(ctk.CTk):
         id_pedido = self.tree_pedidos.item(sel[0])['values'][5]
         
         # Recuperar dados para a comanda
-        self.cursor.execute("SELECT subtotal, taxa, acrescimos, descontos, total, telefone_cliente, data_pedido, tipo FROM pedidos WHERE id_pedido = ?", (id_pedido,))
+        self.cursor.execute("SELECT subtotal, taxa, acrescimos, descontos, total, telefone_cliente, data_pedido, tipo, num_dia FROM pedidos WHERE id_pedido = ?", (id_pedido,))
         p = self.cursor.fetchone()
         vf = {'subtotal': p[0], 'taxa': p[1], 'acrescimos': p[2], 'descontos': p[3], 'total': p[4], 'tipo': p[7]}
         tel = p[5]
         data_pedido_db = p[6]
+        num_dia = p[8]
 
         # 1. Buscar dados completos do cliente no banco (já que os campos da tela sumiram)
         self.cursor.execute("SELECT nome, telefone, rua, numero, bairro, complemento FROM clientes WHERE telefone = ?", (tel,))
@@ -1329,13 +1427,6 @@ class GestorDelivery(ctk.CTk):
         # Formata para o padrão que a função de impressão espera (mesmo formato da Treeview)
         itens_comanda = [(it[0], it[1], it[2], f"R$ {it[3]}", f"{it[4]:.2f}", it[5]) for it in itens_raw]
 
-        # 3. Calcular o número do pedido naquele dia específico
-        self.cursor.execute("""SELECT COUNT(*) FROM pedidos 
-                             WHERE DATE(data_pedido, 'localtime') = DATE(?, 'localtime') 
-                             AND tipo = ? 
-                             AND id_pedido <= ?""", (data_pedido_db, p[7], id_pedido))
-        num_dia = self.cursor.fetchone()[0]
-        
         # 4. Gerar e imprimir passando os dados manualmente
         self.gerar_e_imprimir_comanda(id_pedido, vf, num_dia, tipo=p[7], cliente_info=cliente_info, itens_comanda=itens_comanda)
         messagebox.showinfo("Impressão", "Pedido enviado para a impressora.")
@@ -1518,10 +1609,12 @@ class GestorDelivery(ctk.CTk):
         ctk.CTkLabel(main_f, text="RESUMO DO PAGAMENTO", font=("Arial", 16, "bold"), text_color="#c0392b").pack(pady=10)
 
         def criar_campo_pop(label, valor_init):
+            # Helper para selecionar tudo ao focar, igual ao campo de Qtd
             lbl = ctk.CTkLabel(main_f, text=label, font=("Arial", 12, "bold"))
             lbl.pack(anchor="w", pady=(10, 0))
             ent = ctk.CTkEntry(main_f, height=35, font=("Arial", 14))
             ent.insert(0, f"{valor_init:.2f}")
+            ent.bind("<FocusIn>", lambda e, widget=ent: widget.after(10, lambda: widget.select_range(0, 'end')))
             ent.pack(fill="x")
             return ent
 
@@ -1605,21 +1698,32 @@ class GestorDelivery(ctk.CTk):
                                              WHERE id_pedido=?""", 
                                              (tel, vf['subtotal'], vf['taxa'], vf['acrescimos'], vf['descontos'], vf['total'], tipo_pedido, self.editando_id_pedido))
                         id_pedido = self.editando_id_pedido
+                        # Busca o num_dia existente para a impressão
+                        self.cursor.execute("SELECT num_dia FROM pedidos WHERE id_pedido = ?", (id_pedido,))
+                        num_dia = self.cursor.fetchone()[0]
                         # Limpa os itens antigos para re-inserir a nova versão editada
                         self.cursor.execute("DELETE FROM itens_pedido WHERE id_pedido=?", (id_pedido,))
                     else:
-                        # 2. Insere um Novo Pedido
-                        self.cursor.execute("""INSERT INTO pedidos (telefone_cliente, subtotal, taxa, acrescimos, descontos, total, tipo) 
-                                             VALUES (?, ?, ?, ?, ?, ?, ?)""", 
-                                             (tel, vf['subtotal'], vf['taxa'], vf['acrescimos'], vf['descontos'], vf['total'], tipo_pedido))
-                        id_pedido = self.cursor.lastrowid
+                        # Lógica de Numeração
+                        dia_hoje = datetime.now().strftime("%Y-%m-%d")
+                        if self.tipo_numeracao == "SEQUENCIAL":
+                            self.cursor.execute("""SELECT COALESCE(MAX(num_dia), 0) + 1 FROM pedidos 
+                                                 WHERE DATE(data_pedido, 'localtime') = ? AND tipo = ?""", (dia_hoje, tipo_pedido))
+                            num_dia = self.cursor.fetchone()[0]
+                        else: # PREENCHER
+                            self.cursor.execute("""SELECT num_dia FROM pedidos 
+                                                 WHERE DATE(data_pedido, 'localtime') = ? AND tipo = ? 
+                                                 ORDER BY num_dia ASC""", (dia_hoje, tipo_pedido))
+                            existentes = {r[0] for r in self.cursor.fetchall()}
+                            num_dia = 1
+                            while num_dia in existentes:
+                                num_dia += 1
 
-                    # Calcula o número do pedido no dia (num_dia) baseado na data do pedido e IDs existentes
-                    self.cursor.execute("""SELECT COUNT(*) FROM pedidos 
-                                         WHERE DATE(data_pedido, 'localtime') = (SELECT DATE(data_pedido, 'localtime') FROM pedidos WHERE id_pedido = ?) 
-                                         AND tipo = ? 
-                                         AND id_pedido <= ?""", (id_pedido, tipo_pedido, id_pedido))
-                    num_dia = self.cursor.fetchone()[0]
+                        # 2. Insere um Novo Pedido
+                        self.cursor.execute("""INSERT INTO pedidos (telefone_cliente, subtotal, taxa, acrescimos, descontos, total, tipo, num_dia) 
+                                             VALUES (?, ?, ?, ?, ?, ?, ?, ?)""", 
+                                             (tel, vf['subtotal'], vf['taxa'], vf['acrescimos'], vf['descontos'], vf['total'], tipo_pedido, num_dia))
+                        id_pedido = self.cursor.lastrowid
 
                     # 3. Salva Itens do Pedido
                     for item_id in self.tree.get_children():
@@ -1795,6 +1899,18 @@ class GestorDelivery(ctk.CTk):
         self.var_bloquear_bairro = tk.BooleanVar(value=self.bloquear_bairro_desconhecido)
         self.cb_bloquear_bairro = ctk.CTkSwitch(frame_empresa, text="Bloquear bairros não cadastrados", variable=self.var_bloquear_bairro, font=Theme.FONT_LABEL)
         self.cb_bloquear_bairro.grid(row=3, column=0, columnspan=2, padx=15, pady=10, sticky="w")
+
+        # --- SEÇÃO 1.2: LÓGICA DE NUMERAÇÃO ---
+        frame_num = self.criar_card_container("🔢 LÓGICA DE NUMERAÇÃO DIÁRIA", parent=self.scroll_config)
+        self.var_tipo_num = tk.StringVar(value=self.tipo_numeracao)
+        
+        rb1 = ctk.CTkRadioButton(frame_num, text="Sequencial (Ex: 1, 2, 3, 4, 5... mesmo se apagar o 2)", 
+                                 variable=self.var_tipo_num, value="SEQUENCIAL")
+        rb1.grid(row=1, column=0, sticky="w", padx=15, pady=5)
+        
+        rb2 = ctk.CTkRadioButton(frame_num, text="Preecher Gaps (Ex: se apagar o 2, o próximo será 2)", 
+                                 variable=self.var_tipo_num, value="PREENCHER")
+        rb2.grid(row=2, column=0, sticky="w", padx=15, pady=10)
 
         # --- SEÇÃO 2: CONFIGURAÇÕES DE IMPRESSÃO ---
         frame_print = self.criar_card_container("🖨️ CONFIGURAÇÕES DE IMPRESSÃO", parent=self.scroll_config)
@@ -2022,6 +2138,7 @@ class GestorDelivery(ctk.CTk):
                 'tam_valores': str(self.tam_valores),
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
                 'data_dir': new_data_dir,
+                'tipo_numeracao': self.var_tipo_num.get(),
             }
             
             # Salvar Atalhos e Validar duplicatas na mesma tela
@@ -2100,6 +2217,7 @@ class GestorDelivery(ctk.CTk):
             self.num_vias = int(configs['num_vias']) if configs['num_vias'].isdigit() else 1
             self.impressora_selecionada = None if configs['impressora_selecionada'] == "Nenhuma" else configs['impressora_selecionada']
             self.bloquear_bairro_desconhecido = (configs['bloquear_bairro'] == 'True')
+            self.tipo_numeracao = configs['tipo_numeracao']
 
             # Atualiza o dicionário de atalhos em memória
             for k, v in configs.items():
