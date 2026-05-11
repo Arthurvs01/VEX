@@ -1,52 +1,36 @@
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
-import textwrap
-import sqlite3
 import sys
 import os
 import shutil
+import textwrap
 import time
+import sqlite3
 import threading
-import socket
-import logging
 from datetime import datetime
 import ctypes
 from PIL import Image, ImageDraw, ImageOps
 
 try:
-    from flask import Flask, render_template_string, jsonify, request, send_file
+    import win32print
+    WIN32_AVAILABLE = True
 except ImportError:
-    Flask = None
+    WIN32_AVAILABLE = False
+
+# Módulos Customizados
+from styles import Theme, configurar_estilos_ttk
+from database import DatabaseManager
+from utils import resource_path, obter_ip_local, format_currency
+from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
+from server import criar_app_cardapio
 
 # Biblioteca para Calendário
 try:
     from tkcalendar import DateEntry
 except ImportError:
     DateEntry = None
-
-try:
-    import win32print
-    import win32api
-    WIN32_PRINTER_AVAILABLE = True
-except ImportError:
-    win32print = None
-    win32api = None
-    WIN32_PRINTER_AVAILABLE = False
-
-# --- CONFIGURAÇÃO DE ESTILO PADRONIZADO ---
 ctk.set_appearance_mode("light")
-
-class Theme:
-    PRIMARY = "#c0392b"      # Vermelho principal
-    PRIMARY_HOVER = "#a93226"
-    SUCCESS = "#27ae60"      # Verde sucesso
-    BG_CARD = "#f9f9f9"      # Fundo dos cards
-    BORDER = "#e0e0e0"       # Cor das bordas
-    TEXT_MAIN = "#2c3e50"    # Texto principal
-    FONT_H1 = ("Arial", 16, "bold")
-    FONT_H2 = ("Arial", 14, "bold")
-    FONT_LABEL = ("Arial", 11, "bold")
 
 class GestorDelivery(ctk.CTk):
     # Cache do path base para evitar recálculos constantes
@@ -67,14 +51,14 @@ class GestorDelivery(ctk.CTk):
             pass
 
         # Configuração visual imediata
-        icon_path = self.resource_path("icon.ico")
+        icon_path = resource_path("icon.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
         
         self.sidebar_expandido = True
         self.logo_path = None
         self.taxa_atual = 0.0
-        self.ip_local = self.obter_ip_local()
+        self.ip_local = obter_ip_local()
         self.url_publica = None
         self.tipo_numeracao = "SEQUENCIAL"
         self.tipo_historico_atual = "ENTREGA"
@@ -82,6 +66,14 @@ class GestorDelivery(ctk.CTk):
         self.db = None
         self.impressora_selecionada = None # Armazena a impressora configurada
         self.bloquear_bairro_desconhecido = True
+
+        # Configurações de Impressão: Visibilidade de Seções
+        self.vis_cabecalho = True
+        self.vis_pedido = True
+        self.vis_cliente = True
+        self.vis_itens = True
+        self.vis_totais = True
+        self.vis_pagamento = True
 
         # --- CONFIGURAÇÃO DE ATALHOS PADRÃO ---
         self.atalhos_default = {
@@ -101,9 +93,11 @@ class GestorDelivery(ctk.CTk):
         # Configurações de Impressão Avançadas
         self.largura_papel = 80
         self.tam_cabecalho = 2 # Índice 2 = Médio (14pt)
+        self.tam_pedido = 0
         self.tam_endereco = 2  # Índice 2 = Médio (10pt)
         self.tam_itens = 2     # Índice 2 = Médio (9pt)
         self.tam_valores = 2   # Índice 2 = Médio (9pt)
+        self.tam_pagamento = 0
 
         self.editando_id_pedido = None
         self.title("VEX - Gestor de Comandas [Carregando...]")
@@ -133,7 +127,7 @@ class GestorDelivery(ctk.CTk):
         self.container = ctk.CTkFrame(self, fg_color="white")
         self.container.pack(side="left", fill="both", expand=True)
 
-        # Inicia a carga pesada logo após a janela ser exibida
+        # Inicialização diferida para não travar a abertura da janela
         self.after(100, self.inicializar_sistema_deferred)
 
     def inicializar_sistema_deferred(self):
@@ -142,8 +136,6 @@ class GestorDelivery(ctk.CTk):
         """Executa as tarefas pesadas após a UI inicial aparecer"""
         
         try:
-            # 1. Tenta descobrir se há um caminho customizado no banco local
-            # Isso é necessário caso o programa mude de pasta mas queira manter o data_dir anterior
             if os.path.exists("delivery.db"):
                 try:
                     bootstrap_conn = sqlite3.connect("delivery.db")
@@ -154,72 +146,46 @@ class GestorDelivery(ctk.CTk):
                     bootstrap_conn.close()
                 except: pass
 
-            # 2. Conecta ao banco definitivo
             os.makedirs(self.data_dir, exist_ok=True)
-            self.db = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"), check_same_thread=False)
-            self.cursor = self.db.cursor()
+            self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
+            self.db = self.db_manager.conn
+            self.cursor = self.db_manager.cursor
             
-            # 3. Cria as tabelas e configura estilos
-            self.criar_tabelas()
             self.configurar_estilos_globais()
 
-            # 4. Migrações e Atualização de Schema
-            self.cursor.execute("PRAGMA table_info(produtos)")
-            colunas = [col[1] for col in self.cursor.fetchall()]
-            if 'categoria' not in colunas:
-                self.cursor.execute("ALTER TABLE produtos ADD COLUMN categoria TEXT")
-            if 'ingredientes' not in colunas:
-                self.cursor.execute("ALTER TABLE produtos ADD COLUMN ingredientes TEXT")
-            if 'visivel_web' not in colunas:
-                self.cursor.execute("ALTER TABLE produtos ADD COLUMN visivel_web INTEGER DEFAULT 1")
-            
-            self.cursor.execute("PRAGMA table_info(categorias)")
-            if 'ordem' not in [col[1] for col in self.cursor.fetchall()]:
-                self.cursor.execute("ALTER TABLE categorias ADD COLUMN ordem INTEGER DEFAULT 0")
-
-            self.cursor.execute("PRAGMA table_info(pedidos)")
-            colunas_p = [col[1] for col in self.cursor.fetchall()]
-            if 'num_dia' not in colunas_p:
-                self.cursor.execute("ALTER TABLE pedidos ADD COLUMN num_dia INTEGER")
-                # Backfill (bake numbers as they are currently seen)
-                self.cursor.execute("SELECT id_pedido, DATE(data_pedido, 'localtime'), tipo FROM pedidos ORDER BY id_pedido ASC")
-                all_p = self.cursor.fetchall()
-                counters = {}
-                for pid, dt_p, tp_p in all_p:
-                    k = (dt_p, tp_p)
-                    counters[k] = counters.get(k, 0) + 1
-                    self.cursor.execute("UPDATE pedidos SET num_dia = ? WHERE id_pedido = ?", (counters[k], pid))
-                self.db.commit()
-
-            self.db.commit()
-
-            # 5. Carrega configurações do banco real
             self.cursor.execute("SELECT chave, valor FROM config")
-            for chave, valor in self.cursor.fetchall():
-                if chave == 'impressora_selecionada': self.impressora_selecionada = valor
-                elif chave == 'nome_empresa': self.nome_empresa = valor
-                elif chave == 'fone_empresa': self.fone_empresa = valor
-                elif chave == 'end_empresa': self.end_empresa = valor
-                elif chave == 'num_vias': self.num_vias = int(valor) if valor.isdigit() else 1
-                elif chave == 'largura_papel': self.largura_papel = int(valor) if valor.isdigit() else 80
-                elif chave == 'tam_cabecalho': self.tam_cabecalho = int(valor) if valor.isdigit() else 2
-                elif chave == 'tam_endereco': self.tam_endereco = int(valor) if valor.isdigit() else 2
-                elif chave == 'tam_itens': self.tam_itens = int(valor) if valor.isdigit() else 2
-                elif chave == 'tam_valores': self.tam_valores = int(valor) if valor.isdigit() else 2
-                elif chave == 'data_dir': self.data_dir = valor
-                elif chave == 'bloquear_bairro': self.bloquear_bairro_desconhecido = (valor == 'True')
-                elif chave == 'tipo_numeracao': self.tipo_numeracao = valor
-                elif chave == 'logo_path':
-                    if os.path.exists(valor): self.logo_path = valor
-                elif chave.startswith("atalho_"):
+            configs = {chave: valor for chave, valor in self.cursor.fetchall()}
+            
+            self.impressora_selecionada = configs.get('impressora_selecionada')
+            self.nome_empresa = configs.get('nome_empresa', "MINHA EMPRESA")
+            self.fone_empresa = configs.get('fone_empresa', "(00) 0000-0000")
+            self.end_empresa = configs.get('end_empresa', "")
+            self.num_vias = int(configs.get('num_vias', 1))
+            self.largura_papel = int(configs.get('largura_papel', 80))
+            self.data_dir = configs.get('data_dir', self.data_dir)
+            self.bloquear_bairro_desconhecido = (configs.get('bloquear_bairro') == 'True')
+            self.tipo_numeracao = configs.get('tipo_numeracao', "SEQUENCIAL")
+            if configs.get('logo_path') and os.path.exists(configs['logo_path']):
+                self.logo_path = configs['logo_path']
+            
+            for chave, valor in configs.items():
+                if chave.startswith("atalho_"):
                     partes = chave.split("_")
                     if len(partes) == 3:
                         self.atalhos_usuario.setdefault(partes[1], {})[partes[2]] = valor
             
         except Exception as e:
             print(f"Erro ao conectar banco: {e}")
-        if Flask and self.db: # Inicia o Flask apenas se o DB foi conectado com sucesso
-            threading.Thread(target=self.rodar_servidor_web, daemon=True).start()
+
+        # Inicia Servidor Web com os dados da empresa
+        empresa_info = {
+            'nome': self.nome_empresa, 
+            'fone': self.fone_empresa, 
+            'end': self.end_empresa, 
+            'logo_path': self.logo_path
+        }
+        app_web = criar_app_cardapio(self.data_dir, empresa_info)
+        threading.Thread(target=lambda: app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
 
         # Atualiza o título e entra na tela principal
         self.title("VEX - Gestor de Comandas")
@@ -281,82 +247,8 @@ class GestorDelivery(ctk.CTk):
         return "break" # Impede que a tecla seja digitada normalmente
 
     def configurar_estilos_globais(self):
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Treeview", 
-                        background="white", 
-                        foreground=Theme.TEXT_MAIN, 
-                        rowheight=35, 
-                        fieldbackground="white", 
-                        font=("Arial", 11),
-                        borderwidth=0)
-        style.map("Treeview", background=[('selected', Theme.PRIMARY)], foreground=[('selected', 'white')])
-        style.configure("Treeview.Heading", 
-                        font=("Arial", 11, "bold"), 
-                        background="#f8f9fa", 
-                        foreground="#555", 
-                        relief="flat")
+        configurar_estilos_ttk(ttk.Style())
 
-    def criar_tabelas(self):
-        queries = [
-            """CREATE TABLE IF NOT EXISTS config (
-                chave TEXT PRIMARY KEY,
-                valor TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS clientes (
-                telefone TEXT PRIMARY KEY,
-                nome TEXT,
-                bairro TEXT,
-                rua TEXT,
-                numero TEXT,
-                complemento TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS produtos (
-                id_produto INTEGER PRIMARY KEY,
-                nome TEXT,
-                preco REAL,
-                categoria TEXT,
-                ingredientes TEXT,
-                visivel_web INTEGER DEFAULT 1
-            )""",
-            """CREATE TABLE IF NOT EXISTS categorias (
-                id_categoria INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE,
-                ordem INTEGER DEFAULT 0
-            )""",
-            """CREATE TABLE IF NOT EXISTS bairros (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome TEXT UNIQUE,
-                taxa REAL
-            )""",
-            """CREATE TABLE IF NOT EXISTS pedidos (
-                id_pedido INTEGER PRIMARY KEY AUTOINCREMENT,
-                telefone_cliente TEXT,
-                subtotal REAL,
-                taxa REAL,
-                acrescimos REAL,
-                descontos REAL,
-                total REAL,
-                forma_pagamento TEXT,
-                tipo TEXT DEFAULT 'ENTREGA',
-                troco REAL,
-                num_dia INTEGER,
-                data_pedido TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )""",
-            """CREATE TABLE IF NOT EXISTS itens_pedido (
-                id_item_pedido INTEGER PRIMARY KEY AUTOINCREMENT,
-                id_pedido INTEGER,
-                id_produto INTEGER,
-                quantidade INTEGER,
-                preco_unitario REAL,
-                observacao TEXT,
-                FOREIGN KEY(id_pedido) REFERENCES pedidos(id_pedido)
-            )"""
-        ]
-        for q in queries:
-            self.cursor.execute(q)
-        self.db.commit()
-        
     def criar_sidebar(self):
         """Cria a barra lateral de navegação persistente (chamado apenas uma vez no __init__)"""
         self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0, fg_color=Theme.PRIMARY)
@@ -404,14 +296,13 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.7-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.8-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
-        # Link do WebApp na Sidebar
-        if Flask:
-            txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:5000"
-            self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Arial", 10, "bold"), text_color="#f1c40f")
-            self.lbl_link_web.pack(side="bottom", pady=2)
+        # Link do Cardápio Digital
+        txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:5000"
+        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Arial", 10, "bold"), text_color="#f1c40f")
+        self.lbl_link_web.pack(side="bottom", pady=2)
 
     def atualizar_sidebar(self, nome_ativo):
         """Atualiza a cor dos botões para indicar qual tela está ativa"""
@@ -587,14 +478,21 @@ class GestorDelivery(ctk.CTk):
         self.ent_num = self.criar_campo(self.frame_cliente, "Número", 2, 2)
         self.ent_comp = self.criar_campo(self.frame_cliente, "Complemento", 2, 3)
 
+        # Lista de widgets para monitoramento de foco na área do cliente
+        self.widgets_cliente = [self.ent_tel, self.ent_nome, self.ent_bairro, self.ent_rua, self.ent_num, self.ent_comp]
+
         # BINDINGS DE NAVEGAÇÃO
         self.ent_tel.bind('<Return>', self.buscar_cliente)
         self.ent_nome.bind('<Return>', lambda e: self.ent_bairro.focus())
         self.ent_bairro.bind('<Return>', lambda e: self.ent_rua.focus())
-        self.ent_bairro.bind('<FocusOut>', lambda e: self.buscar_taxa_bairro())
+        self.ent_bairro.bind('<FocusOut>', lambda e: self.buscar_taxa_bairro(), add="+")
         self.ent_rua.bind('<Return>', lambda e: self.ent_num.focus())
         self.ent_num.bind('<Return>', lambda e: self.ent_comp.focus())
         self.ent_comp.bind('<Return>', self.confirmar_cadastro_cliente)
+
+        # Monitorar saída da área de cliente para qualquer outro lugar do sistema
+        for ent in self.widgets_cliente:
+            ent.bind('<FocusOut>', self.verificar_saida_cliente, add="+")
 
         # --- ÁREA DE LANÇAMENTO ---
         self.frame_lancamento = self.criar_card_container("🛒 LANÇAMENTO DE ITENS")
@@ -1329,15 +1227,21 @@ class GestorDelivery(ctk.CTk):
             if self.db:
                 query = """SELECT 
                            p1.num_dia,
-                           c.nome, p1.telefone_cliente, p1.total, p1.data_pedido, p1.id_pedido
-                           FROM pedidos p1 JOIN clientes c ON p1.telefone_cliente = c.telefone 
+                           COALESCE(c.nome, 'Clien. não cadastrado'), p1.telefone_cliente, p1.total, p1.data_pedido, p1.id_pedido
+                           FROM pedidos p1 LEFT JOIN clientes c ON p1.telefone_cliente = c.telefone 
                            WHERE DATE(p1.data_pedido, 'localtime') = ? AND p1.tipo = ? ORDER BY p1.id_pedido DESC"""
                 self.cursor.execute(query, (data_iso, self.tipo_historico_atual))
                 rows = self.cursor.fetchall()
                 for i, linha in enumerate(rows):
                     tag = 'evenrow' if i % 2 == 0 else 'oddrow'
                     faturamento_total += linha[3]
-                    dt = datetime.strptime(linha[4], "%Y-%m-%d %H:%M:%S").strftime("%d/%m/%Y %H:%M")
+                    # Tratamento robusto para formatos de data legados ou variações de timestamp
+                    try:
+                        # Tenta converter os primeiros 19 caracteres (formato padrão ISO)
+                        dt_obj = datetime.strptime(linha[4][:19], "%Y-%m-%d %H:%M:%S")
+                        dt = dt_obj.strftime("%d/%m/%Y %H:%M")
+                    except:
+                        dt = linha[4] # Fallback para o valor bruto caso o formato seja inesperado
                     self.tree_pedidos.insert("", "end", values=(linha[0], linha[1], linha[2], f"R$ {linha[3]:.2f}", dt, linha[5]), tags=(tag,))
                 
                 self.lbl_faturamento.configure(text=f"Faturamento: R$ {faturamento_total:.2f}")
@@ -1479,6 +1383,27 @@ class GestorDelivery(ctk.CTk):
         ent.pack(fill="x", expand=True)
         return ent
 
+    def verificar_saida_cliente(self, event):
+        """Gatilho chamado quando um campo de cliente perde o foco"""
+        # Pequeno atraso para permitir que o sistema processe o novo foco antes da verificação
+        self.after(100, self._validar_permanencia_area_cliente)
+
+    def _validar_permanencia_area_cliente(self):
+        """Verifica se o foco mudou para fora da seção de dados do cliente"""
+        try:
+            novo_foco = self.focus_get()
+            if novo_foco is None: return
+
+            # Identifica os widgets internos reais (tkinter) para comparação de foco
+            entradas_reais = [w._entry for w in self.widgets_cliente]
+            
+            # Se o novo foco não for um dos campos de cliente, tentamos salvar
+            if novo_foco not in entradas_reais:
+                if hasattr(self, 'ent_tel') and self.ent_tel.winfo_exists():
+                    self.confirmar_cadastro_cliente(from_focus_out=True)
+        except Exception:
+            pass
+
     def buscar_cliente(self, event):
         tel = self.ent_tel.get()
         if self.db and tel:
@@ -1503,12 +1428,14 @@ class GestorDelivery(ctk.CTk):
             else:
                 self.ent_nome.focus()
 
-    def confirmar_cadastro_cliente(self, event=None):
+    def confirmar_cadastro_cliente(self, event=None, from_focus_out=False):
         tel = self.ent_tel.get().strip()
         nome = self.ent_nome.get().strip()
         
         if not tel or not nome:
-            self.ent_id.focus()
+            # Se o usuário apenas clicou fora e os campos essenciais estão vazios, não forçamos foco
+            if not from_focus_out:
+                self.ent_id.focus()
             return
 
         bairro = self.ent_bairro.get().strip()
@@ -1534,7 +1461,10 @@ class GestorDelivery(ctk.CTk):
                                      VALUES (?, ?, ?, ?, ?, ?)""", (tel, nome, bairro, rua, num, comp))
                 self.db.commit()
         
-        self.ent_id.focus()
+        # Só transfere o foco para o lançamento de itens se o comando vier de um Enter (evento)
+        # Isso evita que o cursor 'pule' para o código caso o usuário tenha clicado em outro botão propositalmente
+        if not from_focus_out:
+            self.ent_id.focus()
 
     def focar_qtd(self, event):
         id_digitado = self.ent_id.get().strip()
@@ -1764,105 +1694,32 @@ class GestorDelivery(ctk.CTk):
             messagebox.showerror("Erro", "Recursos de impressão não disponíveis neste sistema.")
             return
 
-        try:
-            # Configurações de caracteres baseadas na largura do papel (ESC/POS)
-            limit = int(self.largura_papel * 0.53)
-            
-            # Comandos ESC/POS básicos
-            INIT = b'\x1b@'
-            CENTER = b'\x1ba\x01'
-            LEFT = b'\x1ba\x00'
-            BOLD_ON = b'\x1bE\x01'
-            BOLD_OFF = b'\x1bE\x00'
-            # GS ! n (Tamanho da fonte: 0x00=normal, 0x01=dobro altura, 0x11=dobro total)
-            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x01', b'\x1d!\x10', b'\x1d!\x11', b'\x1d!\x21']
-            
-            raw = INIT + CENTER
-            
-            # Cabeçalho
-            raw += TAM_MAP[self.tam_cabecalho] + BOLD_ON + self.nome_empresa.encode('ascii', 'ignore') + b'\n'
-            raw += TAM_MAP[0] + BOLD_OFF + self.fone_empresa.encode('ascii', 'ignore') + b'\n'
-            
-            label_tipo = "Entrega" if tipo == "ENTREGA" else "Retirada"
-            raw += b'\n' + BOLD_ON + f"{label_tipo.upper()} N. {num_dia}".encode() + BOLD_OFF + b'\n'
-            raw += datetime.now().strftime("%d/%m/%Y %H:%M").encode() + b'\n'
-            raw += b'-' * limit + b'\n'
-            
-            # Cliente e Endereço
-            raw += LEFT + TAM_MAP[self.tam_endereco]
-            if cliente_info is None:
-                cliente_info = {'nome': self.ent_nome.get(), 'tel': self.ent_tel.get(), 'rua': self.ent_rua.get(), 
-                               'num': self.ent_num.get(), 'bairro': self.ent_bairro.get(), 'comp': self.ent_comp.get()}
-            
-            cli_txt = f"Cliente: {cliente_info['nome']}\nTel: {cliente_info['tel']}\n"
-            if tipo == "ENTREGA":
-                cli_txt += f"End: {cliente_info['rua']}, {cliente_info['num']}\nBairro: {cliente_info['bairro']}\n"
-                if cliente_info['comp']: cli_txt += f"Comp: {cliente_info['comp']}\n"
-            
-            for linha in cli_txt.split('\n'):
-                for wrap_l in textwrap.wrap(linha, width=limit):
-                    raw += wrap_l.encode('ascii', 'ignore') + b'\n'
-            
-            raw += b'-' * limit + b'\n'
-            
-            # Itens
-            raw += BOLD_ON + b"ITENS\n" + BOLD_OFF + TAM_MAP[self.tam_itens]
-            if itens_comanda is None:
-                itens_comanda = [self.tree.item(item_id)['values'] for item_id in self.tree.get_children()]
-            
-            for val in itens_comanda:
-                # val: (ID, Produto, Qtd, PrecoUnit, Total, Obs)
-                qtd_nome = f"{val[2]}x {val[1]}"
-                preco = f"R$ {val[4]}"
-                
-                espacos = limit - len(qtd_nome) - len(preco)
-                if espacos < 1:
-                    linhas_nome = textwrap.wrap(qtd_nome, width=limit-10)
-                    raw += linhas_nome[0].encode('ascii', 'ignore')
-                    espacos = limit - len(linhas_nome[0]) - len(preco)
-                    raw += b' ' * espacos + preco.encode() + b'\n'
-                    for extra in linhas_nome[1:]:
-                        raw += b'  ' + extra.encode('ascii', 'ignore') + b'\n'
-                else:
-                    raw += qtd_nome.encode('ascii', 'ignore') + (b' ' * espacos) + preco.encode() + b'\n'
-                
-                if val[5]: # Observação
-                    for obs_l in textwrap.wrap(f"Obs: {val[5]}", width=limit-2):
-                        raw += b'  ' + obs_l.encode('ascii', 'ignore') + b'\n'
-            
-            raw += b'-' * limit + b'\n'
-            
-            # Valores Finais
-            raw += TAM_MAP[self.tam_valores]
-            vals = [("Sub-total:", vf['subtotal']), ("Taxa Entrega:", vf['taxa']), 
-                    ("Descontos:", -vf['descontos']), ("TOTAL:", vf['total'])]
-            
-            for lbl, v in vals:
-                txt_v = f"R$ {v:.2f}"
-                espacos = limit - len(lbl) - len(txt_v)
-                raw += lbl.encode() + (b' ' * espacos) + txt_v.encode() + b'\n'
-            
-            raw += b'\n' + BOLD_ON + CENTER + f"PAGAMENTO: {vf.get('pagamento', 'N/A')}".encode() + b'\n'
-            
-            # Rodapé e Corte
-            raw += b'\n' * 3 + b'\x1dV\x42\x00' # Comando de corte
-            
-            # Envio para impressora
-            printer_to_use = self.impressora_selecionada if self.impressora_selecionada and self.impressora_selecionada != "Nenhuma" else win32print.GetDefaultPrinter()
-            hPrinter = win32print.OpenPrinter(printer_to_use)
-            try:
-                for _ in range(self.num_vias):
-                    win32print.StartDocPrinter(hPrinter, 1, ("Comanda VEX", None, "RAW"))
-                    win32print.StartPagePrinter(hPrinter)
-                    win32print.WritePrinter(hPrinter, raw)
-                    win32print.EndPagePrinter(hPrinter)
-                    win32print.EndDocPrinter(hPrinter)
-                    time.sleep(0.1)
-            finally:
-                win32print.ClosePrinter(hPrinter)
-                
-        except Exception as e:
-            messagebox.showerror("Erro de Impressão", f"Não foi possível imprimir: {e}")
+        config = {
+            'largura_papel': self.largura_papel,
+            'vis_cabecalho': self.vis_cabecalho, 'vis_pedido': self.vis_pedido,
+            'vis_cliente': self.vis_cliente, 'vis_itens': self.vis_itens,
+            'vis_totais': self.vis_totais, 'vis_pagamento': self.vis_pagamento,
+            'tam_cabecalho': self.tam_cabecalho, 'tam_pedido': self.tam_pedido,
+            'tam_endereco': self.tam_endereco, 'tam_itens': self.tam_itens,
+            'tam_valores': self.tam_valores, 'tam_pagamento': self.tam_pagamento,
+            'printer_name': self.impressora_selecionada if self.impressora_selecionada != "Nenhuma" else None,
+            'num_vias': self.num_vias
+        }
+        pedido_info = {'num_dia': num_dia, 'tipo': tipo, 'valores': vf}
+        empresa_info = {'nome': self.nome_empresa, 'fone': self.fone_empresa}
+        
+        if cliente_info is None:
+            cliente_info = {
+                'nome': self.ent_nome.get(), 'tel': self.ent_tel.get(), 'rua': self.ent_rua.get(), 
+                'num': self.ent_num.get(), 'bairro': self.ent_bairro.get(), 'comp': self.ent_comp.get()
+            }
+        
+        if itens_comanda is None:
+            itens_comanda = [self.tree.item(item_id)['values'] for item_id in self.tree.get_children()]
+
+        # Delega a execução para o PrinterManager (Módulo printer.py)
+        if not PrinterManager.imprimir_comanda(config, pedido_info, cliente_info, itens_comanda, empresa_info):
+            messagebox.showerror("Erro de Impressão", "Falha ao processar o envio para a impressora.")
 
     def mostrar_tela_configuracoes(self):
         self.limpar_container()
@@ -1919,19 +1776,8 @@ class GestorDelivery(ctk.CTk):
         ctk.CTkLabel(frame_print, text="Impressora Selecionada:", font=Theme.FONT_LABEL).grid(row=1, column=0, padx=15, pady=10, sticky="w")
         
         impressoras_disponiveis = ["Nenhuma"]
-        if WIN32_PRINTER_AVAILABLE:
-            try:
-                # Enumera todas as impressoras locais e de rede conectadas
-                # Tenta primeiro o Nível 2 (mais detalhado) e depois o Nível 1 como fallback
-                printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS, None, 2)
-                impressoras_disponiveis.extend([p['pPrinterName'] for p in printers])
-                
-                if len(impressoras_disponiveis) == 1: # Se só tem o "Nenhuma", tenta Nível 1
-                    printers = win32print.EnumPrinters(win32print.PRINTER_ENUM_LOCAL | win32print.PRINTER_ENUM_CONNECTIONS, None, 1)
-                    impressoras_disponiveis.extend([p[2] for p in printers if p[2] not in impressoras_disponiveis])
-            except Exception as e:
-                messagebox.showwarning("Erro", f"Não foi possível listar impressoras: {e}")
-                print(f"Erro ao listar impressoras: {e}")
+        if WIN32_AVAILABLE:
+            impressoras_disponiveis = PrinterManager.listar_impressoras()
         else:
             messagebox.showwarning("Aviso", "Módulo 'win32print' não disponível. A seleção de impressora não funcionará.")
 
@@ -2037,78 +1883,94 @@ class GestorDelivery(ctk.CTk):
     def abrir_config_impressora(self):
         pop = ctk.CTkToplevel(self)
         pop.title("Ajustes de Impressão")
-        pop.geometry("450x550")
+        pop.geometry("480x650")
         pop.grab_set()
         pop.attributes("-topmost", True)
 
-        f = ctk.CTkFrame(pop, fg_color="white")
-        f.pack(fill="both", expand=True, padx=20, pady=20)
+        f_ajustes = ctk.CTkScrollableFrame(pop, fg_color="white", label_text="Configurações de Layout")
+        f_ajustes.pack(fill="both", expand=True, padx=10, pady=10)
 
-        ctk.CTkLabel(f, text="📏 LARGURA E FONTES", font=Theme.FONT_H2).pack(pady=10)
-
-        def criar_slider(label, var_name, current_val):
-            ctk.CTkLabel(f, text=label, font=Theme.FONT_LABEL).pack(anchor="w", padx=10)
-            s = ctk.CTkSegmentedButton(f, values=["Mínimo", "Pequeno", "Médio", "Grande", "Máximo"])
-            s.pack(fill="x", padx=10, pady=(0, 10))
-            s.set(["Mínimo", "Pequeno", "Médio", "Grande", "Máximo"][current_val])
-            return s
-
-        ctk.CTkLabel(f, text="Largura do Papel (mm):", font=Theme.FONT_LABEL).pack(anchor="w", padx=10)
-        ed_largura = ctk.CTkEntry(f)
+        ctk.CTkLabel(f_ajustes, text="Largura do Papel (mm):", font=Theme.FONT_LABEL).pack(anchor="w", padx=10, pady=(5, 0))
+        ed_largura = ctk.CTkEntry(f_ajustes)
         ed_largura.insert(0, str(self.largura_papel))
         ed_largura.pack(fill="x", padx=10, pady=(0, 15))
 
-        seg_cab = criar_slider("Tamanho do Cabeçalho:", "tam_cabecalho", self.tam_cabecalho)
-        seg_end = criar_slider("Tamanho do Endereço:", "tam_endereco", self.tam_endereco)
-        seg_itm = criar_slider("Tamanho dos Itens:", "tam_itens", self.tam_itens)
-        seg_val = criar_slider("Tamanho dos Valores:", "tam_valores", self.tam_valores)
+        sections = [
+            ("Cabeçalho", "cabecalho", self.vis_cabecalho, self.tam_cabecalho),
+            ("Dados Pedido", "pedido", self.vis_pedido, self.tam_pedido),
+            ("Dados Cliente", "cliente", self.vis_cliente, self.tam_endereco),
+            ("Lista de Itens", "itens", self.vis_itens, self.tam_itens),
+            ("Totais", "totais", self.vis_totais, self.tam_valores),
+            ("Pagamento", "pagamento", self.vis_pagamento, self.tam_pagamento)
+        ]
 
-        def aplicar():
-            mapa = {"Mínimo": 0, "Pequeno": 1, "Médio": 2, "Grande": 3, "Máximo": 4}
-            self.largura_papel = int(ed_largura.get())
-            self.tam_cabecalho = mapa[seg_cab.get()]
-            self.tam_endereco = mapa[seg_end.get()]
-            self.tam_itens = mapa[seg_itm.get()]
-            self.tam_valores = mapa[seg_val.get()]
+        switches, segs = {}, {}
+        tam_opts = ["Padrão", "Alt. Dupla", "Larg. Dupla", "Grande", "Extra"]
+
+        for label, key, vis, tam in sections:
+            frame = ctk.CTkFrame(f_ajustes, fg_color="transparent")
+            frame.pack(fill="x", pady=10)
+            
+            sw = ctk.CTkSwitch(frame, text=f"Imprimir {label}", font=Theme.FONT_LABEL)
+            if vis: sw.select()
+            sw.pack(anchor="w", padx=10)
+            switches[key] = sw
+
+            sg = ctk.CTkSegmentedButton(frame, values=tam_opts)
+            sg.set(tam_opts[tam])
+            sg.pack(fill="x", padx=10, pady=5)
+            segs[key] = sg
+
+        f_botoes = ctk.CTkFrame(pop, fg_color="transparent")
+        f_botoes.pack(fill="x", pady=20)
+
+        def aplicar_ajustes():
+            mapa = {opt: i for i, opt in enumerate(tam_opts)}
+            try: self.largura_papel = int(ed_largura.get())
+            except: pass
+            
+            self.vis_cabecalho, self.vis_pedido = switches['cabecalho'].get(), switches['pedido'].get()
+            self.vis_cliente, self.vis_itens = switches['cliente'].get(), switches['itens'].get()
+            self.vis_totais, self.vis_pagamento = switches['totais'].get(), switches['pagamento'].get()
+            
+            self.tam_cabecalho, self.tam_pedido = mapa[segs['cabecalho'].get()], mapa[segs['pedido'].get()]
+            self.tam_endereco, self.tam_itens = mapa[segs['cliente'].get()], mapa[segs['itens'].get()]
+            self.tam_valores, self.tam_pagamento = mapa[segs['totais'].get()], mapa[segs['pagamento'].get()]
+            
             self.salvar_todas_configs()
             pop.destroy()
 
-        def imprimir_teste():
-            mapa = {"Mínimo": 0, "Pequeno": 1, "Médio": 2, "Grande": 3, "Máximo": 4}
-            try:
-                largura = int(ed_largura.get())
-                self.imprimir_pagina_teste(
-                    largura,
-                    mapa[seg_cab.get()],
-                    mapa[seg_end.get()],
-                    mapa[seg_itm.get()],
-                    mapa[seg_val.get()]
-                )
-            except ValueError:
-                messagebox.showerror("Erro", "Largura do papel inválida!")
+        ctk.CTkButton(f_botoes, text="🖨️ IMPRIMIR TESTE", fg_color="#34495e", command=lambda: self.imprimir_pagina_teste(ed_largura, switches, segs)).pack(side="left", padx=10, expand=True)
+        ctk.CTkButton(f_botoes, text="APLICAR E SALVAR", fg_color=Theme.SUCCESS, command=aplicar_ajustes).pack(side="left", padx=10, expand=True)
 
-        ctk.CTkButton(f, text="🖨️ IMPRIMIR PÁGINA TESTE", fg_color="#34495e", command=imprimir_teste).pack(pady=(10, 0), fill="x", padx=10)
-        ctk.CTkButton(f, text="APLICAR E SALVAR", fg_color=Theme.SUCCESS, command=aplicar).pack(pady=20, fill="x", padx=10)
+    def imprimir_pagina_teste(self, ed_largura, switches, segs):
+        m = {"Padrão": 0, "Alt. Dupla": 1, "Larg. Dupla": 2, "Grande": 3, "Extra": 4}
+        try: l = int(ed_largura.get())
+        except: l = 80
+        
+        c = {
+            'largura_papel': l,
+            'vis_cabecalho': switches['cabecalho'].get(), 'vis_pedido': switches['pedido'].get(),
+            'vis_cliente': switches['cliente'].get(), 'vis_itens': switches['itens'].get(),
+            'vis_totais': switches['totais'].get(), 'vis_pagamento': switches['pagamento'].get(),
+            'tam_cabecalho': m[segs['cabecalho'].get()], 'tam_pedido': m[segs['pedido'].get()],
+            'tam_endereco': m[segs['cliente'].get()], 'tam_itens': m[segs['itens'].get()],
+            'tam_valores': m[segs['totais'].get()], 'tam_pagamento': m[segs['pagamento'].get()],
+            'printer_name': self.impressora_selecionada if self.impressora_selecionada != "Nenhuma" else None,
+            'num_vias': 1
+        }
 
-    def imprimir_pagina_teste(self, largura, tam_cab, tam_end, tam_itm, tam_val):
-        # Preserva configs atuais
-        old_largura, old_cab, old_end, old_itm, old_val = self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores
-        
-        # Aplica temporariamente para o teste
-        self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores = largura, tam_cab, tam_end, tam_itm, tam_val
-        
         vf = {'subtotal': 15.0, 'taxa': 5.0, 'acrescimos': 0.0, 'descontos': 0.0, 'total': 20.0, 'recebido': 50.0, 'pagamento': 'DINHEIRO'}
         cliente = {'nome': 'CLIENTE TESTE IMPRESSÃO', 'tel': '(00) 00000-0000', 'rua': 'RUA DE TESTE EQUIPAMENTO', 'num': '123', 'bairro': 'BAIRRO EXEMPLO', 'comp': 'LOJA 01'}
         itens = [
             (1, "PRODUTO TESTE 01", 2, "R$ 5.00", "10.00", "Sem cebola"),
             (2, "PRODUTO TESTE 02", 1, "R$ 5.00", "5.00", "")
         ]
+        p_info = {'num_dia': 1, 'tipo': 'ENTREGA', 'valores': vf}
+        e_info = {'nome': self.nome_empresa, 'fone': self.fone_empresa}
         
-        try:
-            self.gerar_e_imprimir_comanda(0, vf, 1, tipo="ENTREGA", cliente_info=cliente, itens_comanda=itens)
-        finally:
-            # Restaura para as configurações salvas anteriormente
-            self.largura_papel, self.tam_cabecalho, self.tam_endereco, self.tam_itens, self.tam_valores = old_largura, old_cab, old_end, old_itm, old_val
+        if not PrinterManager.imprimir_comanda(c, p_info, cliente, itens, e_info):
+            messagebox.showerror("Erro", "Falha ao imprimir teste.")
 
     def salvar_todas_configs(self):
         old_data_dir = self.data_dir
@@ -2133,9 +1995,17 @@ class GestorDelivery(ctk.CTk):
                 'impressora_selecionada': self.cb_impressora.get(),
                 'largura_papel': str(self.largura_papel),
                 'tam_cabecalho': str(self.tam_cabecalho),
+                'tam_pedido': str(self.tam_pedido),
                 'tam_endereco': str(self.tam_endereco),
                 'tam_itens': str(self.tam_itens),
                 'tam_valores': str(self.tam_valores),
+                'tam_pagamento': str(self.tam_pagamento),
+                'vis_cabecalho': str(self.vis_cabecalho),
+                'vis_pedido': str(self.vis_pedido),
+                'vis_cliente': str(self.vis_cliente),
+                'vis_itens': str(self.vis_itens),
+                'vis_totais': str(self.vis_totais),
+                'vis_pagamento': str(self.vis_pagamento),
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
                 'data_dir': new_data_dir,
                 'tipo_numeracao': self.var_tipo_num.get(),
@@ -2246,202 +2116,10 @@ class GestorDelivery(ctk.CTk):
             except Exception as e:
                 print(e)
 
-    def obter_ip_local(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
-            return ip
-        except:
-            return "127.0.0.1"
-
     def browse_data_dir(self):
         new_dir = filedialog.askdirectory(initialdir=self.data_dir)
         if new_dir:
             self.ent_data_dir.configure(state="normal"); self.ent_data_dir.delete(0, 'end'); self.ent_data_dir.insert(0, new_dir); self.ent_data_dir.configure(state="readonly")
-
-    def rodar_servidor_web(self):
-        app_web = Flask(__name__)
-
-        # Silenciar logs do Flask para focar nos logs dos túneis
-        log = logging.getLogger('werkzeug')
-        log.setLevel(logging.ERROR)
-
-        @app_web.route('/logo')
-        def get_logo():
-            if self.logo_path and os.path.exists(self.logo_path):
-                return send_file(self.logo_path)
-            return "", 404
-
-        @app_web.route('/api/menu')
-        def api_menu():
-            cat_selecionada = request.args.get('cat', 'TODOS')
-            page = int(request.args.get('page', 1))
-            per_page = 20
-            offset = (page - 1) * per_page
-            
-            conn = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"))
-            cursor = conn.cursor()
-            
-            # Busca categorias válidas respeitando a ordem definida nas configurações
-            cursor.execute("""SELECT DISTINCT c.nome FROM categorias c 
-                              JOIN produtos p ON c.nome = p.categoria 
-                              WHERE p.categoria NOT LIKE '.%' AND p.categoria IS NOT NULL AND p.categoria != '' AND p.visivel_web = 1 
-                              ORDER BY c.ordem, c.nome""")
-            categorias = [r[0] for r in cursor.fetchall()]
-            
-            # Busca produtos visíveis com paginação e lógica de ordenação por dígitos
-            query = "SELECT id_produto, nome, preco, ingredientes FROM produtos WHERE categoria NOT LIKE '.%' AND categoria IS NOT NULL AND categoria != '' AND visivel_web = 1"
-            params = []
-            if cat_selecionada != 'TODOS':
-                query += " AND categoria = ?"
-                params.append(cat_selecionada)
-
-            query += " ORDER BY (id_produto >= 100), CASE WHEN id_produto < 100 THEN id_produto ELSE 0 END, nome LIMIT ? OFFSET ?"
-            params.extend([per_page, offset])
-            
-            cursor.execute(query, params)
-            produtos = cursor.fetchall()
-
-            # Verifica se existe próxima página
-            cursor.execute(f"SELECT COUNT(*) FROM produtos WHERE categoria NOT LIKE '.%' AND categoria IS NOT NULL AND categoria != '' AND visivel_web = 1 " + 
-                          ("AND categoria = ?" if cat_selecionada != 'TODOS' else ""), 
-                          [cat_selecionada] if cat_selecionada != 'TODOS' else [])
-            total = cursor.fetchone()[0]
-            
-            conn.close()
-            return jsonify({
-                "categorias": categorias,
-                "produtos": produtos,
-                "has_next": (offset + per_page) < total
-            })
-
-        @app_web.route('/')
-        def index():
-            return render_template_string("""
-            <!DOCTYPE html>
-            <html lang="pt-br">
-            <head>
-                <meta charset="UTF-8">
-                <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-                <title>{{ nome }}</title>
-                <script src="https://cdn.tailwindcss.com"></script>
-                <style>
-                    .bg-primary { background-color: #c0392b; }
-                    .text-primary { color: #c0392b; }
-                    .cat-scroll::-webkit-scrollbar { display: none; }
-                    .dots-leader { flex-grow: 1; border-bottom: 2px dotted #ccc; margin: 0 5px; height: 14px; }
-                </style>
-            </head>
-            <body class="bg-white pb-2 text-slate-800">
-                <!-- Header -->
-                <header class="bg-primary text-white p-3 flex items-center gap-3 shadow-md">
-                    <img src="/logo" class="w-10 h-10 rounded-full bg-white object-cover border border-white" onerror="this.style.display='none'">
-                    <div>
-                        <h1 class="text-lg font-bold leading-tight">{{ nome }}</h1>
-                        <p class="text-xs opacity-80">{{ fone }}</p>
-                        <p class="text-xs opacity-80">{{ end }}</p>
-                    </div>
-                </header>
-
-                <!-- Categorias (Scroll Horizontal) -->
-                <div id="categorias" class="flex overflow-x-auto p-2 gap-1.5 cat-scroll sticky top-0 bg-white/95 backdrop-blur-sm z-10 border-b">
-                    <button onclick="setCategory('TODOS')" class="cat-btn bg-primary text-white px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap border border-primary">TODOS</button>
-                </div>
-
-                <!-- Lista de Produtos -->
-                <main id="menu" class="px-3 py-1 space-y-2"></main>
-
-                <!-- Paginação -->
-                <div class="flex justify-center items-center gap-3 mt-2">
-                    <button id="btn-prev" onclick="changePage(-1)" class="bg-white border px-3 py-1 rounded font-bold text-xs disabled:opacity-30">Anterior</button>
-                    <span id="page-num" class="text-xs font-bold text-gray-400">1</span>
-                    <button id="btn-next" onclick="changePage(1)" class="bg-white border px-3 py-1 rounded font-bold text-xs disabled:opacity-30">Próximo</button>
-                </div>
-
-                <script>
-                    let currentCat = 'TODOS';
-                    let currentPage = 1;
-
-                    async function loadMenu() {
-                        const res = await fetch(`/api/menu?cat=${currentCat}&page=${currentPage}`);
-                        const data = await res.json();
-                        
-                        renderCategories(data.categorias);
-                        renderProducts(data.produtos);
-                        
-                        document.getElementById('page-num').innerText = currentPage;
-                        document.getElementById('btn-prev').disabled = currentPage === 1;
-                        document.getElementById('btn-next').disabled = !data.has_next;
-                    }
-
-                    function renderCategories(cats) {
-                        const catDiv = document.getElementById('categorias');
-                        if(catDiv.children.length > 1) return; // Evita duplicar botões
-                        cats.forEach(cat => {
-                            catDiv.innerHTML += `<button onclick="setCategory('${cat}')" class="cat-btn bg-white text-black px-3 py-1 rounded-md text-xs font-bold whitespace-nowrap border">${cat}</button>`;
-                        });
-                    }
-
-                    function renderProducts(prods) {
-                        const menuDiv = document.getElementById('menu');
-                        menuDiv.innerHTML = prods.length ? '' : '<p class="text-center text-gray-400 py-10">Nenhum item nesta página.</p>';
-                        
-                        prods.forEach(p => { 
-                            const idRaw = p[0];
-                            const nome = p[1];
-                            const preco = p[2].toFixed(2);
-                            const ingredientes = p[3] ? `(${p[3]})` : '';
-                            
-                            const idDisplay = idRaw < 100 ? idRaw.toString().padStart(2, '0') + '. ' : '';
-                            
-                            let itemHtml = `<div class="flex flex-col border-b border-gray-50 pb-1">`;
-                            itemHtml += `<div class="flex justify-between items-end">`;
-                            itemHtml += `<span class="text-sm font-bold text-gray-800">${idDisplay}${nome}</span>`;
-                            if (!ingredientes) {
-                                itemHtml += `<div class="dots-leader"></div><span class="text-sm font-bold text-primary">R$ ${preco}</span>`;
-                            }
-                            itemHtml += `</div>`;
-                            if (ingredientes) {
-                                itemHtml += `<div class="flex justify-between items-end text-xs text-gray-500 italic"><span>${ingredientes}</span><div class="dots-leader"></div><span class="text-sm font-bold text-primary">R$ ${preco}</span></div>`;
-                            }
-                            itemHtml += `</div>`;
-                            menuDiv.innerHTML += itemHtml;
-                        });
-                    }
-
-                    function setCategory(cat) {
-                        currentCat = cat;
-                        currentPage = 1;
-                        loadMenu();
-                        
-                        // Efeito visual no botão selecionado
-                        document.querySelectorAll('.cat-btn').forEach(btn => {
-                            if(btn.innerText === cat) {
-                                btn.classList.add('bg-primary', 'text-white');
-                                btn.classList.remove('bg-white', 'text-black');
-                            } else {
-                                btn.classList.remove('bg-primary', 'text-white');
-                                btn.classList.add('bg-white', 'text-black');
-                            }
-                        });
-                    }
-
-                    function changePage(step) {
-                        currentPage += step;
-                        loadMenu();
-                        window.scrollTo({top: 0, behavior: 'smooth'});
-                    }
-
-                    loadMenu();
-                </script>
-            </body>
-            </html>
-            """, nome=self.nome_empresa, fone=self.fone_empresa, end=self.end_empresa)
-
-        print("[FLASK] Iniciando servidor local na porta 5000...")
-        app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
 
 if __name__ == "__main__":
     app = GestorDelivery()
