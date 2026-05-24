@@ -33,13 +33,6 @@ except ImportError:
 ctk.set_appearance_mode("light")
 
 class GestorDelivery(ctk.CTk):
-    # Cache do path base para evitar recálculos constantes
-    _base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
-
-    def resource_path(self, relative_path):
-        """ Retorna o caminho absoluto para recursos, funcionando em modo dev e após compilar """
-        return os.path.join(self._base_path, relative_path)
-
     def __init__(self):
         super().__init__()
 
@@ -123,7 +116,10 @@ class GestorDelivery(ctk.CTk):
         self.bind("<Right>", self.navegar_teclado)
 
         # Layout Base Inicial (Sidebar aparece rápido)
-        self.criar_sidebar()
+        try:
+            self.criar_sidebar()
+        except Exception as e:
+            print(f"Erro ao criar sidebar: {e}")
         self.container = ctk.CTkFrame(self, fg_color="white")
         self.container.pack(side="left", fill="both", expand=True)
 
@@ -146,6 +142,9 @@ class GestorDelivery(ctk.CTk):
                     bootstrap_conn.close()
                 except: pass
 
+            # No Windows 7, caminhos com caracteres especiais podem falhar se não forem tratados como unicode
+            self.data_dir = os.path.abspath(self.data_dir)
+            
             os.makedirs(self.data_dir, exist_ok=True)
             self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
             self.db = self.db_manager.conn
@@ -167,6 +166,20 @@ class GestorDelivery(ctk.CTk):
             self.tipo_numeracao = configs.get('tipo_numeracao', "SEQUENCIAL")
             if configs.get('logo_path') and os.path.exists(configs['logo_path']):
                 self.logo_path = configs['logo_path']
+            
+            # Carrega configurações de layout e visibilidade da impressão
+            self.tam_cabecalho = int(configs.get('tam_cabecalho', 2))
+            self.tam_pedido = int(configs.get('tam_pedido', 0))
+            self.tam_endereco = int(configs.get('tam_endereco', 2))
+            self.tam_itens = int(configs.get('tam_itens', 2))
+            self.tam_valores = int(configs.get('tam_valores', 2))
+            self.tam_pagamento = int(configs.get('tam_pagamento', 0))
+            self.vis_cabecalho = configs.get('vis_cabecalho', 'True') == 'True'
+            self.vis_pedido = configs.get('vis_pedido', 'True') == 'True'
+            self.vis_cliente = configs.get('vis_cliente', 'True') == 'True'
+            self.vis_itens = configs.get('vis_itens', 'True') == 'True'
+            self.vis_totais = configs.get('vis_totais', 'True') == 'True'
+            self.vis_pagamento = configs.get('vis_pagamento', 'True') == 'True'
             
             for chave, valor in configs.items():
                 if chave.startswith("atalho_"):
@@ -296,7 +309,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.8-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.9-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital
@@ -1566,8 +1579,9 @@ class GestorDelivery(ctk.CTk):
 
         def atualizar_calculo_popup(e=None):
             try:
-                total = float(self.ed_sub.get()) + float(self.ed_acr.get()) + float(self.ed_tax.get()) - float(self.ed_des.get())
-                recebido = float(self.ed_recebido.get())
+                def f(v): return float(v.replace(",", ".")) if v.strip() else 0.0
+                total = f(self.ed_sub.get()) + f(self.ed_acr.get()) + f(self.ed_tax.get()) - f(self.ed_des.get())
+                recebido = f(self.ed_recebido.get())
                 self.lbl_final.configure(text=f"TOTAL: R$ {total:.2f} | Troco: R$ {max(0, recebido-total):.2f}")
             except: pass
 

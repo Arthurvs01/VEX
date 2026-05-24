@@ -1,6 +1,8 @@
 Comandas/
 assets/
 build/
+__pycache__/
+venv/
 
 *.db
 *.pdf
