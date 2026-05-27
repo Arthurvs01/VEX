@@ -23,7 +23,22 @@ from styles import Theme, configurar_estilos_ttk
 from database import DatabaseManager
 from utils import resource_path, obter_ip_local, format_currency
 from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
-from server import criar_app_cardapio
+from server import criar_app_vex
+from ui_helpers import create_tooltip, styled_nav_button
+from constants import (
+    APP_NAME, APP_TITLE_LOADING, WINDOWS_APP_ID, WINDOW_SCALE_FACTOR,
+    DEFAULT_COMPANY_NAME, DEFAULT_COMPANY_PHONE, DEFAULT_COMPANY_ADDRESS,
+    DEFAULT_NUM_VIAS, DEFAULT_NUMBERING_TYPE, DEFAULT_HISTORY_TYPE,
+    DEFAULT_PAPER_WIDTH, DEFAULT_HEADER_SIZE, DEFAULT_ORDER_SIZE,
+    DEFAULT_ADDRESS_SIZE, DEFAULT_ITEMS_SIZE, DEFAULT_VALUES_SIZE,
+    DEFAULT_PAYMENT_SIZE, DEFAULT_PRINT_VISIBILITY, DEFAULT_SHORTCUTS,
+    APPDATA_FOLDER, DATABASE_FILENAME, SIDEBAR_EXPANDED,
+    BLOCK_UNKNOWN_NEIGHBORHOOD, DEFAULT_DELIVERY_FEE, 
+    DEFAULT_WEBAPP_MENU_ENABLED, DEFAULT_WEBAPP_ADMIN_ENABLED,
+    DEFERRED_INIT_DELAY, WEB_SERVER_PORT, WEB_SERVER_HOST, WEB_SERVER_DEBUG,
+    ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP, NAVIGATION_BINDING_KEYS,
+    MODIFIER_KEYS
+)
 
 # Biblioteca para Calendário
 try:
@@ -33,13 +48,17 @@ except ImportError:
 ctk.set_appearance_mode("light")
 
 class GestorDelivery(ctk.CTk):
+    """
+    Aplicação principal para gestão de comandas de delivery.
+    Gerencia interface gráfica, pedidos, impressão e servidor web.
+    """
+    
     def __init__(self):
         super().__init__()
 
         # Configuração para exibir o ícone corretamente na barra de tarefas do Windows
         try:
-            myappid = 'vex.gestor.comandas.v1' # Identificador único arbitrário
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
         except Exception:
             pass
 
@@ -48,60 +67,60 @@ class GestorDelivery(ctk.CTk):
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
         
-        self.sidebar_expandido = True
+        self.sidebar_expandido = SIDEBAR_EXPANDED
         self.logo_path = None
-        self.taxa_atual = 0.0
+        self.taxa_atual = DEFAULT_DELIVERY_FEE
         self.ip_local = obter_ip_local()
         self.url_publica = None
-        self.tipo_numeracao = "SEQUENCIAL"
-        self.tipo_historico_atual = "ENTREGA"
-        self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'VEXGestor')
+        self.tipo_numeracao = DEFAULT_NUMBERING_TYPE
+        self.tipo_historico_atual = DEFAULT_HISTORY_TYPE
+        self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', APPDATA_FOLDER)
         self.db = None
-        self.impressora_selecionada = None # Armazena a impressora configurada
-        self.bloquear_bairro_desconhecido = True
+        self.impressora_selecionada = None
+        self.bloquear_bairro_desconhecido = BLOCK_UNKNOWN_NEIGHBORHOOD
 
         # Configurações de Impressão: Visibilidade de Seções
-        self.vis_cabecalho = True
-        self.vis_pedido = True
-        self.vis_cliente = True
-        self.vis_itens = True
-        self.vis_totais = True
-        self.vis_pagamento = True
+        self.vis_cabecalho = DEFAULT_PRINT_VISIBILITY['header']
+        self.vis_pedido = DEFAULT_PRINT_VISIBILITY['order']
+        self.vis_cliente = DEFAULT_PRINT_VISIBILITY['client']
+        self.vis_itens = DEFAULT_PRINT_VISIBILITY['items']
+        self.vis_totais = DEFAULT_PRINT_VISIBILITY['totals']
+        self.vis_pagamento = DEFAULT_PRINT_VISIBILITY['payment']
 
-        # --- CONFIGURAÇÃO DE ATALHOS PADRÃO ---
-        self.atalhos_default = {
-            "Delivery": {"Finalizar": "F1", "Consulta": "F5", "Limpar": "F6", "Editar Item": "F2", "Excluir Item": "Delete"},
-            "Histórico": {"Visualizar": "F1", "Editar": "F2", "Reimprimir": "F3", "Excluir": "Delete"},
-            "Cardápio": {"Salvar": "F2", "Limpar": "F3", "Excluir": "Delete"}
-        }
-        self.atalhos_usuario = {} # Carregado do Banco
-        self.atalhos_binds = []   # Armazena os binds ativos para limpeza
+        # WebApp Configs
+        self.webapp_menu_enabled = DEFAULT_WEBAPP_MENU_ENABLED
+        self.webapp_admin_enabled = DEFAULT_WEBAPP_ADMIN_ENABLED
+
+        # Atalhos de Teclado
+        self.atalhos_default = DEFAULT_SHORTCUTS.copy()
+        self.atalhos_usuario = {}
+        self.atalhos_binds = []
         
         # Configurações Padrão
-        self.nome_empresa = "MINHA EMPRESA"
-        self.fone_empresa = "(00) 0000-0000"
-        self.end_empresa = ""
-        self.num_vias = 1
+        self.nome_empresa = DEFAULT_COMPANY_NAME
+        self.fone_empresa = DEFAULT_COMPANY_PHONE
+        self.end_empresa = DEFAULT_COMPANY_ADDRESS
+        self.num_vias = DEFAULT_NUM_VIAS
 
         # Configurações de Impressão Avançadas
-        self.largura_papel = 80
-        self.tam_cabecalho = 2 # Índice 2 = Médio (14pt)
-        self.tam_pedido = 0
-        self.tam_endereco = 2  # Índice 2 = Médio (10pt)
-        self.tam_itens = 2     # Índice 2 = Médio (9pt)
-        self.tam_valores = 2   # Índice 2 = Médio (9pt)
-        self.tam_pagamento = 0
+        self.largura_papel = DEFAULT_PAPER_WIDTH
+        self.tam_cabecalho = DEFAULT_HEADER_SIZE
+        self.tam_pedido = DEFAULT_ORDER_SIZE
+        self.tam_endereco = DEFAULT_ADDRESS_SIZE
+        self.tam_itens = DEFAULT_ITEMS_SIZE
+        self.tam_valores = DEFAULT_VALUES_SIZE
+        self.tam_pagamento = DEFAULT_PAYMENT_SIZE
 
         self.editando_id_pedido = None
-        self.title("VEX - Gestor de Comandas [Carregando...]")
+        self.title(APP_TITLE_LOADING)
 
         # Configuração de Janela: Centralizar e Iniciar Maximizada
         largura_tela = self.winfo_screenwidth()
         altura_tela = self.winfo_screenheight()
         
-        # Define o tamanho da janela como 80% da tela para manter a proporção (formato)
-        largura_janela = int(largura_tela * 0.8)
-        altura_janela = int(altura_tela * 0.8)
+        # Define o tamanho da janela como escala da tela para manter proporção
+        largura_janela = int(largura_tela * WINDOW_SCALE_FACTOR)
+        altura_janela = int(altura_tela * WINDOW_SCALE_FACTOR)
 
         pos_x = (largura_tela // 2) - (largura_janela // 2)
         pos_y = (altura_tela // 2) - (altura_janela // 2)
@@ -110,21 +129,19 @@ class GestorDelivery(ctk.CTk):
         self.after(0, lambda: self.state('zoomed'))
 
         # Atalhos de Teclado Globais para Navegação
-        self.bind("<Up>", self.navegar_teclado)
-        self.bind("<Down>", self.navegar_teclado)
-        self.bind("<Left>", self.navegar_teclado)
-        self.bind("<Right>", self.navegar_teclado)
+        for key_binding in NAVIGATION_BINDING_KEYS:
+            self.bind(key_binding, self.navegar_teclado)
 
         # Layout Base Inicial (Sidebar aparece rápido)
         try:
             self.criar_sidebar()
         except Exception as e:
             print(f"Erro ao criar sidebar: {e}")
-        self.container = ctk.CTkFrame(self, fg_color="white")
+        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_MAIN)
         self.container.pack(side="left", fill="both", expand=True)
 
         # Inicialização diferida para não travar a abertura da janela
-        self.after(100, self.inicializar_sistema_deferred)
+        self.after(DEFERRED_INIT_DELAY, self.inicializar_sistema_deferred)
 
     def inicializar_sistema_deferred(self):
         # Define o padrão AppData, que pode ser sobrescrito pelo banco local (bootstrap)
@@ -180,6 +197,8 @@ class GestorDelivery(ctk.CTk):
             self.vis_itens = configs.get('vis_itens', 'True') == 'True'
             self.vis_totais = configs.get('vis_totais', 'True') == 'True'
             self.vis_pagamento = configs.get('vis_pagamento', 'True') == 'True'
+            self.webapp_menu_enabled = configs.get('webapp_menu_enabled', 'True') == 'True'
+            self.webapp_admin_enabled = configs.get('webapp_admin_enabled', 'False') == 'True'
             
             for chave, valor in configs.items():
                 if chave.startswith("atalho_"):
@@ -191,23 +210,45 @@ class GestorDelivery(ctk.CTk):
             print(f"Erro ao conectar banco: {e}")
 
         # Inicia Servidor Web com os dados da empresa
-        empresa_info = {
+        self.server_info = {
             'nome': self.nome_empresa, 
             'fone': self.fone_empresa, 
             'end': self.end_empresa, 
             'logo_path': self.logo_path
         }
-        app_web = criar_app_cardapio(self.data_dir, empresa_info)
-        threading.Thread(target=lambda: app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
+        self.server_config = {
+            'menu_enabled': self.webapp_menu_enabled,
+            'admin_enabled': self.webapp_admin_enabled
+        }
+        app_web = criar_app_vex(self.data_dir, self.server_info, self.server_config)
+        web_server_thread = threading.Thread(
+            target=lambda: app_web.run(
+                host=WEB_SERVER_HOST,
+                port=WEB_SERVER_PORT,
+                debug=WEB_SERVER_DEBUG,
+                use_reloader=False
+            ),
+            daemon=True
+        )
+        web_server_thread.start()
 
         # Atualiza o título e entra na tela principal
-        self.title("VEX - Gestor de Comandas")
+        self.title(APP_NAME)
         self.mostrar_tela_delivery()
         if self.logo_path:
             self.atualizar_imagem_logo()
 
-    def obter_atalho(self, tela, funcao):
-        """Retorna o atalho configurado ou o padrão"""
+    def obter_atalho(self, tela: str, funcao: str) -> str:
+        """
+        Retorna o atalho configurado para uma função em uma tela específica.
+        
+        Args:
+            tela: Nome da tela (ex: "Delivery", "Histórico")
+            funcao: Nome da função (ex: "Finalizar", "Salvar")
+            
+        Returns:
+            String com o atalho (ex: "F1") ou vazio se não configurado
+        """
         return self.atalhos_usuario.get(tela, {}).get(funcao, self.atalhos_default.get(tela, {}).get(funcao, ""))
 
     def registrar_atalhos(self, tela):
@@ -246,44 +287,50 @@ class GestorDelivery(ctk.CTk):
                     self.atalhos_binds.append(tecla)
 
     def capturar_tecla_atalho(self, event, ent):
-        """Captura a tecla pressionada e insere o nome no campo de configuração"""
+        """
+        Captura a tecla pressionada e insere o nome no campo de configuração.
+        
+        Args:
+            event: Evento de teclado do Tkinter
+            ent: Widget Entry para inserir a tecla capturada
+        """
         tecla = event.keysym
         
         # Ignorar teclas modificadoras sozinhas
-        if tecla in ["Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock"]:
+        if tecla in MODIFIER_KEYS:
             return "break"
 
         ent.delete(0, 'end')
         # BackSpace limpa o campo, outras teclas são inseridas
         if tecla != "BackSpace":
             ent.insert(0, tecla)
-        return "break" # Impede que a tecla seja digitada normalmente
+        return "break"  # Impede que a tecla seja digitada normalmente
 
     def configurar_estilos_globais(self):
         configurar_estilos_ttk(ttk.Style())
 
     def criar_sidebar(self):
         """Cria a barra lateral de navegação persistente (chamado apenas uma vez no __init__)"""
-        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0, fg_color=Theme.PRIMARY)
+        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=Theme.PRIMARY)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False) # Impede que o conteúdo interno mude a largura
 
         # Header da Sidebar (Menu + Logo)
         self.frame_logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.frame_logo.pack(fill="x", pady=(5, 20))
+        self.frame_logo.pack(fill="x", pady=(8, 18))
 
-        self.btn_menu = ctk.CTkButton(self.frame_logo, text="≡", width=40, height=40,
-                                      fg_color="transparent", font=("Arial", 24, "bold"),
-                                      hover_color="#a93226", command=self.toggle_sidebar)
+        self.btn_menu = ctk.CTkButton(self.frame_logo, text="≡", width=44, height=44,
+                                      fg_color="transparent", font=Theme.FONT_H1,
+                                      hover_color=Theme.PRIMARY_HOVER, command=self.toggle_sidebar)
         self.btn_menu.pack(side="top", anchor="ne", padx=10)
 
         # Espaço para o Ícone/Logo
         self.btn_logo = ctk.CTkButton(self.frame_logo, text="Logo", width=110, height=110,
                                       corner_radius=55, fg_color=Theme.PRIMARY_HOVER,
-                                      hover_color="#8e2b21", text_color="white",
+                                      hover_color=Theme.PRIMARY_HOVER, text_color="white",
                                       font=Theme.FONT_LABEL,
                                       command=self.selecionar_logo)
-        self.btn_logo.pack(pady=10)
+        self.btn_logo.pack(pady=8)
 
         if self.logo_path:
             self.atualizar_imagem_logo()
@@ -300,21 +347,18 @@ class GestorDelivery(ctk.CTk):
         
         self.nav_buttons = []
         for texto, icone, comando in self.nav_info:
-            btn = ctk.CTkButton(self.sidebar, text=texto, fg_color="transparent", height=45,
-                                text_color="white", hover_color="#a93226",
-                                font=("Arial", 14, "bold"), anchor="w" if self.sidebar_expandido else "center",
-                                border_width=0,
-                                command=comando)
-            btn.pack(pady=10, padx=20, fill="x")
+            btn = styled_nav_button(self.sidebar, texto, icone, comando, expanded=self.sidebar_expandido)
+            btn.pack(pady=6, padx=12, fill="x")
+            create_tooltip(btn, texto)
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.9-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.10-beta", font=Theme.FONT_NORMAL, text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital
-        txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:5000"
-        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Arial", 10, "bold"), text_color="#f1c40f")
+        txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:{WEB_SERVER_PORT}"
+        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=Theme.FONT_NORMAL, text_color="#f1c40f")
         self.lbl_link_web.pack(side="bottom", pady=2)
 
     def atualizar_sidebar(self, nome_ativo):
@@ -446,22 +490,19 @@ class GestorDelivery(ctk.CTk):
         self.lbl_total = ctk.CTkLabel(self.frame_total, text="TOTAL: R$ 0,00", font=("Arial", 28, "bold"), text_color=Theme.PRIMARY)
         self.lbl_total.pack(side="right", padx=20)
 
-        self.btn_finalizar = ctk.CTkButton(self.frame_total, text=f"🚀 FINALIZAR ({self.obter_atalho('Delivery', 'Finalizar')})", 
-                                           fg_color=Theme.SUCCESS, hover_color="#219150", height=45, 
-                                           font=("Arial", 15, "bold"), command=self.finalizar_pedido)
+        from ui_helpers import styled_action_button
+        self.btn_finalizar = styled_action_button(self.frame_total, f"FINALIZAR ({self.obter_atalho('Delivery', 'Finalizar')})", 
+                                                 Theme.SUCCESS, self.finalizar_pedido, "🚀")
         self.btn_finalizar.pack(side="left", padx=5)
 
-        self.btn_consultar = ctk.CTkButton(self.frame_total, text=f"🔍 CONSULTA ({self.obter_atalho('Delivery', 'Consulta')})", 
-                                           fg_color="#34495e", height=45, 
-                                           font=("Arial", 15, "bold"), command=self.abrir_consulta_precos)
+        self.btn_consultar = styled_action_button(self.frame_total, f"CONSULTA ({self.obter_atalho('Delivery', 'Consulta')})", 
+                                                 Theme.SECONDARY, self.abrir_consulta_precos, "🔍")
         self.btn_consultar.pack(side="left", padx=5)
         
-        self.btn_editar_item = ctk.CTkButton(self.frame_total, text=f"📝 EDITAR ({self.obter_atalho('Delivery', 'Editar Item')})", 
-                                             fg_color="#2980b9", height=45, font=("Arial", 12, "bold"), command=self.editar_item_carrinho)
+        self.btn_editar_item = styled_action_button(self.frame_total, f"EDITAR", Theme.ACCENT, self.editar_item_carrinho, "📝")
         self.btn_editar_item.pack(side="left", padx=5)
 
-        self.btn_excluir_item = ctk.CTkButton(self.frame_total, text=f"❌ EXCLUIR ({self.obter_atalho('Delivery', 'Excluir Item')})", 
-                                              fg_color="#e74c3c", height=45, font=("Arial", 12, "bold"), command=self.excluir_item_carrinho)
+        self.btn_excluir_item = styled_action_button(self.frame_total, f"EXCLUIR", Theme.DANGER, self.excluir_item_carrinho, "❌")
         self.btn_excluir_item.pack(side="left", padx=5)
 
         # Botão Cancelar
@@ -1783,6 +1824,21 @@ class GestorDelivery(ctk.CTk):
                                  variable=self.var_tipo_num, value="PREENCHER")
         rb2.grid(row=2, column=0, sticky="w", padx=15, pady=10)
 
+        # --- SEÇÃO 1.3: ACESSO WEB ---
+        frame_web = self.criar_card_container("🌐 ACESSO WEB E MOBILE", parent=self.scroll_config)
+        
+        self.var_menu_web = tk.BooleanVar(value=self.webapp_menu_enabled)
+        ctk.CTkSwitch(frame_web, text="Habilitar Cardápio Digital (Clientes)", 
+                      variable=self.var_menu_web).grid(row=1, column=0, padx=15, pady=5, sticky="w")
+        
+        self.var_admin_web = tk.BooleanVar(value=self.webapp_admin_enabled)
+        ctk.CTkSwitch(frame_web, text="Habilitar Painel Administrativo Web (Operador)", 
+                      variable=self.var_admin_web).grid(row=2, column=0, padx=15, pady=5, sticky="w")
+        
+        links = f"Cardápio: http://{self.ip_local}:{WEB_SERVER_PORT}\n"
+        links += f"Painel Admin: http://{self.ip_local}:{WEB_SERVER_PORT}/admin"
+        ctk.CTkLabel(frame_web, text=links, font=("Consolas", 10), text_color=Theme.ACCENT, justify="left").grid(row=3, column=0, padx=15, pady=10, sticky="w")
+
         # --- SEÇÃO 2: CONFIGURAÇÕES DE IMPRESSÃO ---
         frame_print = self.criar_card_container("🖨️ CONFIGURAÇÕES DE IMPRESSÃO", parent=self.scroll_config)
         frame_print.grid_columnconfigure(1, weight=1)
@@ -1991,14 +2047,11 @@ class GestorDelivery(ctk.CTk):
         new_data_dir = self.ent_data_dir.get()
 
         data_dir_changed = (old_data_dir != new_data_dir)
-        mover = False
+        escolha = None
         if data_dir_changed:
-            mover = messagebox.askyesno("Mudar Pasta de Dados", 
-                                        f"Deseja mover os arquivos de dados existentes para a nova pasta?\n\n"
-                                        f"De: {old_data_dir}\n"
-                                        f"Para: {new_data_dir}\n\n"
-                                        "Sim: Move o banco de dados e imagens atuais.\n"
-                                        "Não: Cria um novo banco de dados vazio na nova pasta.")
+            escolha = self.pedir_escolha_migracao(old_data_dir, new_data_dir)
+            if escolha == "CANCELAR":
+                return
 
         try:
             configs = {
@@ -2023,6 +2076,8 @@ class GestorDelivery(ctk.CTk):
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
                 'data_dir': new_data_dir,
                 'tipo_numeracao': self.var_tipo_num.get(),
+                'webapp_menu_enabled': str(self.var_menu_web.get()),
+                'webapp_admin_enabled': str(self.var_admin_web.get()),
             }
             
             # Salvar Atalhos e Validar duplicatas na mesma tela
@@ -2051,7 +2106,7 @@ class GestorDelivery(ctk.CTk):
                     self.db.close()
                     self.db = None
                 
-                if mover:
+                if escolha == "MOVER":
                     try:
                         os.makedirs(new_data_dir, exist_ok=True)
                         # Migração do Banco de Dados
@@ -2082,11 +2137,17 @@ class GestorDelivery(ctk.CTk):
                 # Atualiza a variável de diretório e reconecta
                 self.data_dir = new_data_dir
                 os.makedirs(self.data_dir, exist_ok=True)
-                self.db = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"), check_same_thread=False)
-                self.cursor = self.db.cursor()
+                
+                if escolha == "NOVO":
+                    db_destino = os.path.join(self.data_dir, "delivery.db")
+                    if os.path.exists(db_destino):
+                        try: os.remove(db_destino)
+                        except: pass
 
-                if not mover:
-                    self.criar_tabelas() # Cria estrutura se for banco novo
+                # Inicializa DatabaseManager (que já cria tabelas e aplica migrações)
+                self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
+                self.db = self.db_manager.conn
+                self.cursor = self.db_manager.cursor
                 
                 # Persiste as configurações atuais no novo banco de dados
                 for chave, valor in configs.items():
@@ -2102,6 +2163,21 @@ class GestorDelivery(ctk.CTk):
             self.impressora_selecionada = None if configs['impressora_selecionada'] == "Nenhuma" else configs['impressora_selecionada']
             self.bloquear_bairro_desconhecido = (configs['bloquear_bairro'] == 'True')
             self.tipo_numeracao = configs['tipo_numeracao']
+            self.webapp_menu_enabled = self.var_menu_web.get()
+            self.webapp_admin_enabled = self.var_admin_web.get()
+
+            # Atualiza os dicionários do servidor web em tempo real
+            if hasattr(self, 'server_config'):
+                self.server_config['menu_enabled'] = self.webapp_menu_enabled
+                self.server_config['admin_enabled'] = self.webapp_admin_enabled
+            
+            if hasattr(self, 'server_info'):
+                self.server_info.update({
+                    'nome': self.nome_empresa,
+                    'fone': self.fone_empresa,
+                    'end': self.end_empresa,
+                    'logo_path': self.logo_path
+                })
 
             # Atualiza o dicionário de atalhos em memória
             for k, v in configs.items():
@@ -2109,7 +2185,7 @@ class GestorDelivery(ctk.CTk):
                     p = k.split("_")
                     self.atalhos_usuario.setdefault(p[1], {})[p[2]] = v
             
-            messagebox.showinfo("Sucesso", "Configurações aplicadas!")
+            messagebox.showinfo("Sucesso", "Configurações aplicadas! Reinicie para surtir efeito total no servidor.")
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar: {e}")
 
@@ -2134,6 +2210,49 @@ class GestorDelivery(ctk.CTk):
         new_dir = filedialog.askdirectory(initialdir=self.data_dir)
         if new_dir:
             self.ent_data_dir.configure(state="normal"); self.ent_data_dir.delete(0, 'end'); self.ent_data_dir.insert(0, new_dir); self.ent_data_dir.configure(state="readonly")
+
+    def pedir_escolha_migracao(self, old_dir, new_dir):
+        """Exibe diálogo customizado para escolha de migração de dados."""
+        res = {"val": "CANCELAR"}
+        
+        pop = ctk.CTkToplevel(self)
+        pop.title("Configuração de Dados")
+        pop.geometry("480x420")
+        pop.grab_set()
+        pop.attributes("-topmost", True)
+        
+        # Centralizar popup
+        pop.update_idletasks()
+        x = (pop.winfo_screenwidth() // 2) - (480 // 2)
+        y = (pop.winfo_screenheight() // 2) - (420 // 2)
+        pop.geometry(f"+{x}+{y}")
+
+        main_f = ctk.CTkFrame(pop, fg_color="white")
+        main_f.pack(fill="both", expand=True, padx=20, pady=20)
+
+        ctk.CTkLabel(main_f, text="MUDANÇA DE PASTA DE DADOS", font=("Arial", 16, "bold"), text_color=Theme.PRIMARY).pack(pady=10)
+        
+        info = f"Origem: {old_dir}\nDestino: {new_dir}\n\nO que deseja fazer com as informações do sistema?"
+        ctk.CTkLabel(main_f, text=info, font=("Arial", 11), justify="left", wraplength=400).pack(pady=10)
+
+        def definir_escolha(v):
+            res["val"] = v
+            pop.destroy()
+
+        ctk.CTkButton(main_f, text="Mover Banco de Dados Atual", height=45, fg_color=Theme.PRIMARY, 
+                      command=lambda: definir_escolha("MOVER")).pack(fill="x", pady=5)
+        
+        ctk.CTkButton(main_f, text="Manter Banco de Dados Existente", height=45, fg_color="#34495e", 
+                      command=lambda: definir_escolha("MANTER")).pack(fill="x", pady=5)
+        
+        ctk.CTkButton(main_f, text="Criar Novo Banco de Dados", height=45, fg_color="#e74c3c", 
+                      command=lambda: definir_escolha("NOVO")).pack(fill="x", pady=5)
+
+        ctk.CTkButton(main_f, text="Cancelar", height=35, fg_color="gray", 
+                      command=lambda: definir_escolha("CANCELAR")).pack(fill="x", pady=(15, 0))
+
+        self.wait_window(pop)
+        return res["val"]
 
 if __name__ == "__main__":
     app = GestorDelivery()
