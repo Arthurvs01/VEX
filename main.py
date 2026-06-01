@@ -378,7 +378,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.10-beta", font=Theme.FONT_NORMAL, text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.11-beta", font=Theme.FONT_NORMAL, text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital
