@@ -34,18 +34,18 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
 
     def get_db_connection() -> sqlite3.Connection:
         """Estabelece conexão com o banco de dados."""
-        return sqlite3.connect(os.path.join(data_dir, "delivery.db"))
+        conn = sqlite3.connect(os.path.join(data_dir, "delivery.db"))
+        conn.row_factory = sqlite3.Row
+        return conn
 
     def get_sys_config() -> Dict[str, Any]:
         """Recupera todas as configurações do banco de dados."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT chave, valor FROM config")
-            res = {chave: valor for chave, valor in cursor.fetchall()}
-            conn.close()
-            return res
-        except:
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT chave, valor FROM config")
+                return {chave: valor for chave, valor in cursor.fetchall()}
+        except Exception:
             return {}
 
     def get_next_num_dia(tipo: str) -> int:
@@ -94,30 +94,29 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
         offset = (page - 1) * per_page
         
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # Categorias
-            cursor.execute(
-                """SELECT DISTINCT c.nome FROM categorias c 
-                   JOIN produtos p ON c.nome = p.categoria 
-                   WHERE p.visivel_web = 1 ORDER BY c.ordem, c.nome"""
-            )
-            categorias = [r[0] for r in cursor.fetchall()]
-            
-            # Produtos
-            query = "SELECT id_produto, nome, preco, ingredientes FROM produtos WHERE visivel_web = 1"
-            params: List[Any] = []
-            if cat_selecionada != 'TODOS':
-                query += " AND categoria = ?"
-                params.append(cat_selecionada)
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
 
-            query += " ORDER BY (id_produto >= 100), CASE WHEN id_produto < 100 THEN id_produto ELSE 0 END, nome LIMIT ? OFFSET ?"
-            params.extend([per_page, offset])
-            
-            cursor.execute(query, params)
-            produtos = cursor.fetchall()
-            conn.close()
+                # Categorias
+                cursor.execute(
+                    """SELECT DISTINCT c.nome FROM categorias c 
+                       JOIN produtos p ON c.nome = p.categoria 
+                       WHERE p.visivel_web = 1 ORDER BY c.ordem, c.nome"""
+                )
+                categorias = [r[0] for r in cursor.fetchall()]
+
+                # Produtos
+                query = "SELECT id_produto, nome, preco, ingredientes FROM produtos WHERE visivel_web = 1"
+                params: List[Any] = []
+                if cat_selecionada != 'TODOS':
+                    query += " AND categoria = ?"
+                    params.append(cat_selecionada)
+
+                query += " ORDER BY (id_produto >= 100), CASE WHEN id_produto < 100 THEN id_produto ELSE 0 END, nome LIMIT ? OFFSET ?"
+                params.extend([per_page, offset])
+
+                cursor.execute(query, params)
+                produtos = [list(row) for row in cursor.fetchall()]
             
             return jsonify({
                 "categorias": categorias,
@@ -136,11 +135,10 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
     def api_admin_buscar_cliente(tel):
         """Busca dados de um cliente pelo telefone."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT nome, bairro, rua, numero, complemento FROM clientes WHERE telefone = ?", (tel,))
-            res = cursor.fetchone()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT nome, bairro, rua, numero, complemento FROM clientes WHERE telefone = ?", (tel,))
+                res = cursor.fetchone()
             return jsonify(res if res else None)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -161,11 +159,10 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
     def api_admin_produtos():
         """Retorna lista de todos os produtos para gestão web."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("SELECT id_produto, nome, preco, categoria, visivel_web FROM produtos ORDER BY categoria, nome")
-            rows = cursor.fetchall()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT id_produto, nome, preco, categoria, visivel_web FROM produtos ORDER BY categoria, nome")
+                rows = [list(row) for row in cursor.fetchall()]
             return jsonify(rows)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -174,26 +171,24 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
     def api_admin_detalhes_pedido(id_pedido):
         """Retorna todos os dados de um pedido específico."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT p.*, c.nome as cliente_nome, c.bairro, c.rua, c.numero, c.complemento
-                FROM pedidos p LEFT JOIN clientes c ON p.telefone_cliente = c.telefone
-                WHERE p.id_pedido = ?
-            """, (id_pedido,))
-            pedido = cursor.fetchone()
-            
-            if not pedido:
-                return jsonify({"error": "Pedido não encontrado"}), 404
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT p.*, c.nome as cliente_nome, c.bairro, c.rua, c.numero, c.complemento
+                    FROM pedidos p LEFT JOIN clientes c ON p.telefone_cliente = c.telefone
+                    WHERE p.id_pedido = ?
+                """, (id_pedido,))
+                pedido = cursor.fetchone()
 
-            cursor.execute("""
-                SELECT i.*, pr.nome 
-                FROM itens_pedido i JOIN produtos pr ON i.id_produto = pr.id_produto
-                WHERE i.id_pedido = ?
-            """, (id_pedido,))
-            itens = cursor.fetchall()
-            conn.close()
-            
+                if not pedido:
+                    return jsonify({"error": "Pedido não encontrado"}), 404
+
+                cursor.execute("""
+                    SELECT i.*, pr.nome 
+                    FROM itens_pedido i JOIN produtos pr ON i.id_produto = pr.id_produto
+                    WHERE i.id_pedido = ?
+                """, (id_pedido,))
+                itens = [list(row) for row in cursor.fetchall()]
             return jsonify({"pedido": pedido, "itens": itens})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -203,15 +198,14 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
         """Retorna pedidos do dia para o painel administrativo."""
         data_ref = request.args.get('data', datetime.now().strftime("%Y-%m-%d"))
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT p.id_pedido, c.nome, p.total, p.data_pedido, p.tipo, p.num_dia 
-                FROM pedidos p LEFT JOIN clientes c ON p.telefone_cliente = c.telefone
-                WHERE DATE(p.data_pedido, 'localtime') = ? ORDER BY p.id_pedido DESC
-            """, (data_ref,))
-            rows = cursor.fetchall()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT p.id_pedido, c.nome, p.total, p.data_pedido, p.tipo, p.num_dia 
+                    FROM pedidos p LEFT JOIN clientes c ON p.telefone_cliente = c.telefone
+                    WHERE DATE(p.data_pedido, 'localtime') = ? ORDER BY p.id_pedido DESC
+                """, (data_ref,))
+                rows = [list(row) for row in cursor.fetchall()]
             return jsonify(rows)
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -220,12 +214,11 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
     def api_admin_excluir(id_pedido):
         """Exclui um pedido e seus itens."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM itens_pedido WHERE id_pedido = ?", (id_pedido,))
-            cursor.execute("DELETE FROM pedidos WHERE id_pedido = ?", (id_pedido,))
-            conn.commit()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM itens_pedido WHERE id_pedido = ?", (id_pedido,))
+                cursor.execute("DELETE FROM pedidos WHERE id_pedido = ?", (id_pedido,))
+                conn.commit()
             return jsonify({"status": "success"})
         except Exception as e:
             return jsonify({"error": str(e)}), 500
@@ -234,18 +227,14 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
     def api_admin_reimprimir(id_pedido):
         """Gera e envia a comanda para a impressora configurada no desktop."""
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            # Coleta dados do pedido
-            cursor.execute("SELECT * FROM pedidos WHERE id_pedido = ?", (id_pedido,))
-            p = cursor.fetchone()
-            # Coleta itens
-            cursor.execute("SELECT i.id_produto, pr.nome, i.quantidade, i.preco_unitario, (i.quantidade*i.preco_unitario), i.observacao FROM itens_pedido i JOIN produtos pr ON i.id_produto = pr.id_produto WHERE i.id_pedido = ?", (id_pedido,))
-            itens = cursor.fetchall()
-            # Coleta cliente
-            cursor.execute("SELECT nome, telefone, rua, numero, bairro, complemento FROM clientes WHERE telefone = ?", (p[1],))
-            c = cursor.fetchone()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT * FROM pedidos WHERE id_pedido = ?", (id_pedido,))
+                p = cursor.fetchone()
+                cursor.execute("SELECT i.id_produto, pr.nome, i.quantidade, i.preco_unitario, (i.quantidade*i.preco_unitario), i.observacao FROM itens_pedido i JOIN produtos pr ON i.id_produto = pr.id_produto WHERE i.id_pedido = ?", (id_pedido,))
+                itens = cursor.fetchall()
+                cursor.execute("SELECT nome, telefone, rua, numero, bairro, complemento FROM clientes WHERE telefone = ?", (p[1],))
+                c = cursor.fetchone()
 
             # Configurações do sistema
             sys_cfg = get_sys_config()
@@ -287,38 +276,27 @@ def criar_app_vex(data_dir: str, empresa_info: Dict[str, Any], config: Dict[str,
         """Salva ou atualiza um pedido vindo da interface web."""
         data = request.json
         try:
-            conn = get_db_connection()
-            cursor = conn.cursor()
-            
-            # 1. Salvar/Atualizar Cliente
-            c = data['cliente']
-            cursor.execute("""INSERT OR REPLACE INTO clientes (telefone, nome, bairro, rua, numero, complemento) 
-                             VALUES (?, ?, ?, ?, ?, ?)""", (c['tel'], c['nome'], c['bairro'], c['rua'], c['num'], c['comp']))
-            
-            # 2. Pedido
-            v = data['valores']
-            id_pedido = data.get('id_pedido')
-            tipo = data['tipo']
-            
-            if id_pedido:
-                # Update
-                cursor.execute("""UPDATE pedidos SET telefone_cliente=?, subtotal=?, taxa=?, acrescimos=?, descontos=?, total=?, forma_pagamento=?, tipo=?
-                                 WHERE id_pedido=?""", (c['tel'], v['subtotal'], v['taxa'], v['acrescimos'], v['descontos'], v['total'], v['pagamento'], tipo, id_pedido))
-                cursor.execute("DELETE FROM itens_pedido WHERE id_pedido=?", (id_pedido,))
-            else:
-                # Insert
-                num_dia = get_next_num_dia(tipo)
-                cursor.execute("""INSERT INTO pedidos (telefone_cliente, subtotal, taxa, acrescimos, descontos, total, forma_pagamento, tipo, num_dia)
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (c['tel'], v['subtotal'], v['taxa'], v['acrescimos'], v['descontos'], v['total'], v['pagamento'], tipo, num_dia))
-                id_pedido = cursor.lastrowid
-
-            # 3. Itens
-            for it in data['itens']:
-                cursor.execute("""INSERT INTO itens_pedido (id_pedido, id_produto, quantidade, preco_unitario, observacao)
-                                 VALUES (?, ?, ?, ?, ?)""", (id_pedido, it['id'], it['qtd'], it['preco'], it['obs']))
-            
-            conn.commit()
-            conn.close()
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                c = data['cliente']
+                cursor.execute("""INSERT OR REPLACE INTO clientes (telefone, nome, bairro, rua, numero, complemento) 
+                                 VALUES (?, ?, ?, ?, ?, ?)""", (c['tel'], c['nome'], c['bairro'], c['rua'], c['num'], c['comp']))
+                v = data['valores']
+                id_pedido = data.get('id_pedido')
+                tipo = data['tipo']
+                if id_pedido:
+                    cursor.execute("""UPDATE pedidos SET telefone_cliente=?, subtotal=?, taxa=?, acrescimos=?, descontos=?, total=?, forma_pagamento=?, tipo=?
+                                     WHERE id_pedido=?""", (c['tel'], v['subtotal'], v['taxa'], v['acrescimos'], v['descontos'], v['total'], v['pagamento'], tipo, id_pedido))
+                    cursor.execute("DELETE FROM itens_pedido WHERE id_pedido=?", (id_pedido,))
+                else:
+                    num_dia = get_next_num_dia(tipo)
+                    cursor.execute("""INSERT INTO pedidos (telefone_cliente, subtotal, taxa, acrescimos, descontos, total, forma_pagamento, tipo, num_dia)
+                                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", (c['tel'], v['subtotal'], v['taxa'], v['acrescimos'], v['descontos'], v['total'], v['pagamento'], tipo, num_dia))
+                    id_pedido = cursor.lastrowid
+                for it in data['itens']:
+                    cursor.execute("""INSERT INTO itens_pedido (id_pedido, id_produto, quantidade, preco_unitario, observacao)
+                                     VALUES (?, ?, ?, ?, ?)""", (id_pedido, it['id'], it['qtd'], it['preco'], it['obs']))
+                conn.commit()
             return jsonify({"status": "success", "id_pedido": id_pedido})
         except Exception as e:
             return jsonify({"error": str(e)}), 500

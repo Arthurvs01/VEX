@@ -243,7 +243,9 @@ class PrinterManager:
             try:
                 for _ in range(config.get('num_vias', 1)):
                     win32print.StartDocPrinter(hPrinter, 1, ("Comanda VEX", None, "RAW"))
+                    win32print.StartPagePrinter(hPrinter)
                     win32print.WritePrinter(hPrinter, raw)
+                    win32print.EndPagePrinter(hPrinter)
                     win32print.EndDocPrinter(hPrinter)
                     time.sleep(0.1)
                 return True

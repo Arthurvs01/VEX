@@ -5,10 +5,10 @@ import sys
 import os
 import shutil
 import textwrap
-import time
 import sqlite3
 import threading
 from datetime import datetime
+from pathlib import Path
 import ctypes
 from PIL import Image, ImageDraw, ImageOps
 
@@ -127,6 +127,7 @@ class GestorDelivery(ctk.CTk):
         
         self.geometry(f"{largura_janela}x{altura_janela}+{pos_x}+{pos_y}")
         self.after(0, lambda: self.state('zoomed'))
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Atalhos de Teclado Globais para Navegação
         for key_binding in NAVIGATION_BINDING_KEYS:
@@ -149,40 +150,41 @@ class GestorDelivery(ctk.CTk):
         """Executa as tarefas pesadas após a UI inicial aparecer"""
         
         try:
-            if os.path.exists("delivery.db"):
+            bootstrap_db = Path("delivery.db")
+            if bootstrap_db.exists():
                 try:
-                    bootstrap_conn = sqlite3.connect("delivery.db")
-                    b_cursor = bootstrap_conn.cursor()
-                    b_cursor.execute("SELECT valor FROM config WHERE chave = 'data_dir'")
-                    res = b_cursor.fetchone()
-                    if res: self.data_dir = res[0]
-                    bootstrap_conn.close()
-                except: pass
+                    with sqlite3.connect(bootstrap_db) as bootstrap_conn:
+                        b_cursor = bootstrap_conn.cursor()
+                        b_cursor.execute("SELECT valor FROM config WHERE chave = 'data_dir'")
+                        res = b_cursor.fetchone()
+                        if res:
+                            self.data_dir = res[0]
+                except Exception:
+                    pass
 
-            # No Windows 7, caminhos com caracteres especiais podem falhar se não forem tratados como unicode
-            self.data_dir = os.path.abspath(self.data_dir)
-            
-            os.makedirs(self.data_dir, exist_ok=True)
+            self.data_dir = str(Path(self.data_dir).expanduser().resolve())
+            Path(self.data_dir).mkdir(parents=True, exist_ok=True)
             self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
             self.db = self.db_manager.conn
             self.cursor = self.db_manager.cursor
             
             self.configurar_estilos_globais()
 
-            self.cursor.execute("SELECT chave, valor FROM config")
-            configs = {chave: valor for chave, valor in self.cursor.fetchall()}
+            configs = {chave: valor for chave, valor in self.db_fetchall("SELECT chave, valor FROM config")}
             
             self.impressora_selecionada = configs.get('impressora_selecionada')
-            self.nome_empresa = configs.get('nome_empresa', "MINHA EMPRESA")
-            self.fone_empresa = configs.get('fone_empresa', "(00) 0000-0000")
-            self.end_empresa = configs.get('end_empresa', "")
-            self.num_vias = int(configs.get('num_vias', 1))
-            self.largura_papel = int(configs.get('largura_papel', 80))
+            self.nome_empresa = configs.get('nome_empresa', DEFAULT_COMPANY_NAME)
+            self.fone_empresa = configs.get('fone_empresa', DEFAULT_COMPANY_PHONE)
+            self.end_empresa = configs.get('end_empresa', DEFAULT_COMPANY_ADDRESS)
+            self.num_vias = int(configs.get('num_vias', DEFAULT_NUM_VIAS))
+            self.largura_papel = int(configs.get('largura_papel', DEFAULT_PAPER_WIDTH))
             self.data_dir = configs.get('data_dir', self.data_dir)
-            self.bloquear_bairro_desconhecido = (configs.get('bloquear_bairro') == 'True')
-            self.tipo_numeracao = configs.get('tipo_numeracao', "SEQUENCIAL")
+            self.bloquear_bairro_desconhecido = configs.get('bloquear_bairro', 'True') == 'True'
+            self.tipo_numeracao = configs.get('tipo_numeracao', DEFAULT_NUMBERING_TYPE)
             if configs.get('logo_path') and os.path.exists(configs['logo_path']):
                 self.logo_path = configs['logo_path']
+            if hasattr(self, 'lbl_link_web'):
+                self.lbl_link_web.configure(text=f"📱 LOCAL:\nhttp://{self.ip_local}:{WEB_SERVER_PORT}")
             
             # Carrega configurações de layout e visibilidade da impressão
             self.tam_cabecalho = int(configs.get('tam_cabecalho', 2))
@@ -251,18 +253,37 @@ class GestorDelivery(ctk.CTk):
         """
         return self.atalhos_usuario.get(tela, {}).get(funcao, self.atalhos_default.get(tela, {}).get(funcao, ""))
 
+    def _format_bind_key(self, tecla: str) -> str:
+        if not tecla:
+            return ""
+        tecla = tecla.strip()
+        if tecla.startswith("<") and tecla.endswith(">"):
+            return tecla
+        return f"<{tecla}>"
+
+    def db_execute(self, query: str, params=()):
+        self.cursor.execute(query, params)
+        self.db.commit()
+        return self.cursor
+
+    def db_fetchone(self, query: str, params=()):
+        self.cursor.execute(query, params)
+        return self.cursor.fetchone()
+
+    def db_fetchall(self, query: str, params=()):
+        self.cursor.execute(query, params)
+        return self.cursor.fetchall()
+
     def registrar_atalhos(self, tela):
         """Limpa binds anteriores e registra os novos da tela atual"""
         for b in self.atalhos_binds:
-            key_to_unbind = f"<{b}>" if len(b) > 1 else b
-            self.unbind_all(key_to_unbind)
+            self.unbind_all(b)
         self.atalhos_binds.clear()
 
         atalhos_tela = self.atalhos_default.get(tela, {})
         for funcao in atalhos_tela.keys():
             tecla = self.obter_atalho(tela, funcao)
             if tecla:
-                # Mapeamento de funções por tela
                 cmd = None
                 if tela == "Delivery":
                     if funcao == "Finalizar": cmd = lambda e: self.finalizar_pedido()
@@ -281,10 +302,9 @@ class GestorDelivery(ctk.CTk):
                     elif funcao == "Excluir": cmd = lambda e: self.excluir_produto_db()
 
                 if cmd:
-                    # Tkinter usa <Key> para letras e <F1> para funções
-                    bind_key = f"<{tecla}>" if len(tecla) > 1 else tecla
+                    bind_key = self._format_bind_key(tecla)
                     self.bind_all(bind_key, cmd)
-                    self.atalhos_binds.append(tecla)
+                    self.atalhos_binds.append(bind_key)
 
     def capturar_tecla_atalho(self, event, ent):
         """
@@ -294,20 +314,25 @@ class GestorDelivery(ctk.CTk):
             event: Evento de teclado do Tkinter
             ent: Widget Entry para inserir a tecla capturada
         """
-        tecla = event.keysym
-        
-        # Ignorar teclas modificadoras sozinhas
+        tecla = event.keysym.upper()
         if tecla in MODIFIER_KEYS:
             return "break"
 
         ent.delete(0, 'end')
-        # BackSpace limpa o campo, outras teclas são inseridas
-        if tecla != "BackSpace":
+        if tecla != "BACKSPACE":
             ent.insert(0, tecla)
-        return "break"  # Impede que a tecla seja digitada normalmente
+        return "break"
 
     def configurar_estilos_globais(self):
         configurar_estilos_ttk(ttk.Style())
+
+    def on_close(self):
+        try:
+            if hasattr(self, 'db_manager') and self.db_manager:
+                self.db_manager.fechar()
+        except Exception:
+            pass
+        self.destroy()
 
     def criar_sidebar(self):
         """Cria a barra lateral de navegação persistente (chamado apenas uma vez no __init__)"""
