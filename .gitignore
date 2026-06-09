@@ -9,3 +9,4 @@ venv/
 *.spec
 *.png
 *.iss
+VEX.code-workspace

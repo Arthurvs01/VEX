@@ -65,7 +65,25 @@ class PrinterManager:
     @staticmethod
     def _encode_text(text: str) -> bytes:
         """Codifica texto para CP850, ignorando caracteres incompatíveis."""
+        import platform
+        # Em Windows 7 alguns drivers não lidam bem com CP850; cair para cp1252
+        try:
+            if platform.system() == 'Windows' and platform.release().startswith('7'):
+                return text.encode('cp1252', 'replace')
+        except Exception:
+            pass
         return text.encode('cp850', 'ignore')
+
+    @staticmethod
+    def _get_preferred_encoding() -> str:
+        """Retorna a codificação preferida conforme SO (útil para selecionar comandos ESC/POS)."""
+        import platform
+        try:
+            if platform.system() == 'Windows' and platform.release().startswith('7'):
+                return 'cp1252'
+        except Exception:
+            pass
+        return 'cp850'
 
     @staticmethod
     def _format_item_line(qtd_nome: str, preco: str, limit: int) -> bytes:
@@ -126,7 +144,8 @@ class PrinterManager:
             # Configurações de largura
             limit = int(config.get('largura_papel', ESCPOSCommands.DEFAULT_PAPER_WIDTH) * 0.53)
             
-            raw = ESCPOSCommands.INIT + ESCPOSCommands.SET_CP850 + ESCPOSCommands.CENTER
+            enc = PrinterManager._get_preferred_encoding()
+            raw = ESCPOSCommands.INIT + (ESCPOSCommands.SET_CP850 if enc == 'cp850' else b'') + ESCPOSCommands.CENTER
             
             # 1. Cabeçalho Empresa
             if config.get('vis_cabecalho', True):
