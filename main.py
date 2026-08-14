@@ -165,6 +165,21 @@ class GestorDelivery(ctk.CTk):
             self.data_dir = configs.get('data_dir', self.data_dir)
             self.bloquear_bairro_desconhecido = (configs.get('bloquear_bairro') == 'True')
             self.tipo_numeracao = configs.get('tipo_numeracao', "SEQUENCIAL")
+            
+            self.tam_cabecalho = int(configs.get('tam_cabecalho', self.tam_cabecalho))
+            self.tam_pedido = int(configs.get('tam_pedido', self.tam_pedido))
+            self.tam_endereco = int(configs.get('tam_endereco', self.tam_endereco))
+            self.tam_itens = int(configs.get('tam_itens', self.tam_itens))
+            self.tam_valores = int(configs.get('tam_valores', self.tam_valores))
+            self.tam_pagamento = int(configs.get('tam_pagamento', self.tam_pagamento))
+            
+            self.vis_cabecalho = (configs.get('vis_cabecalho', str(self.vis_cabecalho)) == 'True')
+            self.vis_pedido = (configs.get('vis_pedido', str(self.vis_pedido)) == 'True')
+            self.vis_cliente = (configs.get('vis_cliente', str(self.vis_cliente)) == 'True')
+            self.vis_itens = (configs.get('vis_itens', str(self.vis_itens)) == 'True')
+            self.vis_totais = (configs.get('vis_totais', str(self.vis_totais)) == 'True')
+            self.vis_pagamento = (configs.get('vis_pagamento', str(self.vis_pagamento)) == 'True')
+
             if configs.get('logo_path') and os.path.exists(configs['logo_path']):
                 self.logo_path = configs['logo_path']
             
@@ -296,7 +311,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.8-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.9-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital

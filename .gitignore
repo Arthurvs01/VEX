@@ -1,6 +1,7 @@
 Comandas/
 assets/
 build/
+__pycache__/
 
 *.db
 *.pdf
