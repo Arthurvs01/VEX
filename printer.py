@@ -45,7 +45,7 @@ class PrinterManager:
             LEFT = b'\x1ba\x00'
             BOLD_ON = b'\x1bE\x01'
             BOLD_OFF = b'\x1bE\x00'
-            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x01', b'\x1d!\x10', b'\x1d!\x11', b'\x1d!\x21']
+            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x11', b'\x1d!\x22', b'\x1d!\x33', b'\x1d!\x44']
             # Comando ESC t n: Seleciona tabela de caracteres (n=2 é CP850)
             SET_CP850 = b'\x1bt\x02'
             
@@ -83,7 +83,8 @@ class PrinterManager:
                 for val in itens:
                     # val: (ID, Produto, Qtd, PrecoUnit, Total, Obs)
                     qtd_nome = f"{val[2]}x {val[1]}"
-                    preco = f"R$ {val[4]}"
+                    val_str = str(val[4]).replace("R$ ", "").replace(",", ".")
+                    preco = f"R$ {float(val_str):.2f}"
                     
                     espacos = limit - len(qtd_nome) - len(preco)
                     if espacos < 1:

@@ -21,6 +21,17 @@ def obter_ip_local():
     except:
         return "127.0.0.1"
 
+def obter_ip_ipv6():
+    """ Retorna o IP IPv6 da máquina para acesso externo (se disponível). """
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(("2001:4860:4860::8888", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return None
+
 def format_currency(value):
     """ Helper para formatar valores monetários. """
     try:

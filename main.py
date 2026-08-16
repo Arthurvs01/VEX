@@ -21,7 +21,7 @@ except ImportError:
 # Módulos Customizados
 from styles import Theme, configurar_estilos_ttk
 from database import DatabaseManager
-from utils import resource_path, obter_ip_local, format_currency
+from utils import resource_path, obter_ip_local, format_currency, obter_ip_ipv6
 from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
 from server import criar_app_cardapio
 
@@ -31,6 +31,16 @@ try:
 except ImportError:
     DateEntry = None
 ctk.set_appearance_mode("light")
+
+# Estilização global para botões mais arredondados e harmônicos
+_old_btn_init = ctk.CTkButton.__init__
+def _new_btn_init(self, *args, **kwargs):
+    kwargs.setdefault('corner_radius', 6)
+    kwargs.setdefault('border_width', 0)
+    if 'font' not in kwargs:
+        kwargs['font'] = ("Segoe UI", 12, "bold")
+    _old_btn_init(self, *args, **kwargs)
+ctk.CTkButton.__init__ = _new_btn_init
 
 class GestorDelivery(ctk.CTk):
     # Cache do path base para evitar recálculos constantes
@@ -58,7 +68,9 @@ class GestorDelivery(ctk.CTk):
         self.sidebar_expandido = True
         self.logo_path = None
         self.taxa_atual = 0.0
+        # Utilidades (IPs)
         self.ip_local = obter_ip_local()
+        self.ip_ipv6 = obter_ip_ipv6()
         self.url_publica = None
         self.tipo_numeracao = "SEQUENCIAL"
         self.tipo_historico_atual = "ENTREGA"
@@ -200,7 +212,29 @@ class GestorDelivery(ctk.CTk):
             'logo_path': self.logo_path
         }
         app_web = criar_app_cardapio(self.data_dir, empresa_info)
-        threading.Thread(target=lambda: app_web.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False), daemon=True).start()
+        
+        import socket
+        from waitress import serve
+        try:
+            # Testa se o IPv6 está disponível e funciona para bind (dual-stack)
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.bind(('::', 0))
+            s.close()
+            host = '::'
+            self.rede_ativa = "IPv6/IPv4"
+        except Exception:
+            host = '0.0.0.0'
+            self.rede_ativa = "IPv4 Apenas"
+            
+        if hasattr(self, 'lbl_link_web'):
+            texto_link = f"📱 REDE: {self.rede_ativa}\nLocal: http://{self.ip_local}:5000"
+            if self.ip_ipv6:
+                texto_link += f"\nIPv6: http://[{self.ip_ipv6}]:5000"
+            self.lbl_link_web.configure(text=texto_link)
+
+        # Utiliza o Waitress, um servidor WSGI pronto para produção que lida melhor com conexões externas e rede no Windows
+        ipv6 = "2804:894:f0cb:b300:5769:f653:d49f:57b6"
+        threading.Thread(target=lambda: serve(app_web, host=ipv6, port=5000, threads=6), daemon=True).start()
 
         # Atualiza o título e entra na tela principal
         self.title("VEX - Gestor de Comandas")
@@ -311,13 +345,13 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.9-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.1.0-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital
-        txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:5000"
-        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Arial", 10, "bold"), text_color="#f1c40f")
-        self.lbl_link_web.pack(side="bottom", pady=2)
+        txt_link = f"📱 INICIANDO REDE...\nhttp://{self.ip_local}:5000"
+        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Segoe UI", 10, "bold"), text_color="#f1c40f")
+        self.lbl_link_web.pack(side="bottom", pady=5)
 
     def atualizar_sidebar(self, nome_ativo):
         """Atualiza a cor dos botões para indicar qual tela está ativa"""
@@ -415,6 +449,14 @@ class GestorDelivery(ctk.CTk):
         for btn, texto, icone in self.nav_buttons:
             btn.configure(text=texto if self.sidebar_expandido else icone, 
                           anchor="w" if self.sidebar_expandido else "center")
+                          
+        # Atualiza visibilidade dos textos do rodapé
+        if self.sidebar_expandido:
+            self.lbl_versao.pack(side="bottom", pady=10)
+            self.lbl_link_web.pack(side="bottom", pady=5)
+        else:
+            self.lbl_versao.pack_forget()
+            self.lbl_link_web.pack_forget()
 
     def limpar_container(self):
         """Remove todos os widgets do container principal"""
@@ -749,6 +791,12 @@ class GestorDelivery(ctk.CTk):
         self.btn_limpar_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"LIMPAR ({self.obter_atalho('Cardápio', 'Limpar')})", fg_color="gray", 
                                              font=("Arial", 13, "bold"), command=self.limpar_campos_cardapio)
         self.btn_limpar_prod.grid(row=0, column=2, padx=5)
+        
+        self.btn_sel_todos = ctk.CTkButton(self.frame_acoes_prod, text="☑️ SEL. TODOS", fg_color="#8e44ad", hover_color="#732d91", font=("Arial", 11, "bold"), height=25, command=lambda: [self.tree_prod.selection_add(i) for i in self.tree_prod.get_children()])
+        self.btn_sel_todos.grid(row=1, column=0, pady=(5,0), padx=5)
+
+        self.btn_desel_todos = ctk.CTkButton(self.frame_acoes_prod, text="🔲 DESMARCAR", fg_color="#7f8c8d", hover_color="#95a5a6", font=("Arial", 11, "bold"), height=25, command=lambda: self.tree_prod.selection_remove(self.tree_prod.selection()))
+        self.btn_desel_todos.grid(row=1, column=1, pady=(5,0), padx=5)
 
         self.btn_excluir_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"EXCLUIR ({self.obter_atalho('Cardápio', 'Excluir')})", fg_color="#e74c3c", hover_color="#c0392b", 
                                               font=("Arial", 13, "bold"), command=self.excluir_produto_db)
@@ -760,14 +808,16 @@ class GestorDelivery(ctk.CTk):
         self.cb_filtro_cat.set("TODOS")
 
         # --- TABELA DE PRODUTOS ---
-        self.tree_prod = ttk.Treeview(self.container, columns=("ID", "Produto", "Categoria", "Preço"), 
+        self.tree_prod = ttk.Treeview(self.container, columns=("Sel", "ID", "Produto", "Categoria", "Preço"), 
                                       show="headings", selectmode="extended", style="Treeview")
+        self.tree_prod.heading("Sel", text="☑")
         self.tree_prod.heading("ID", text="ID ↕", command=lambda: self.ordenar_coluna_cardapio("ID", False))
         self.tree_prod.heading("Produto", text="Nome do Produto ↕", command=lambda: self.ordenar_coluna_cardapio("Produto", False))
         self.tree_prod.heading("Categoria", text="Categoria ↕", command=lambda: self.ordenar_coluna_cardapio("Categoria", False))
         self.tree_prod.heading("Preço", text="Preço (R$) ↕", command=lambda: self.ordenar_coluna_cardapio("Preço", False))
 
-        self.tree_prod.column("ID", width=100, anchor="center")
+        self.tree_prod.column("Sel", width=40, anchor="center")
+        self.tree_prod.column("ID", width=80, anchor="center")
         self.tree_prod.column("Produto", width=300, anchor="w")
         self.tree_prod.column("Categoria", width=150, anchor="center")
         self.tree_prod.column("Preço", width=100, anchor="center")
@@ -776,6 +826,7 @@ class GestorDelivery(ctk.CTk):
         self.tree_prod.tag_configure('evenrow', background="#f1f2f6")
 
         self.tree_prod.pack(pady=10, padx=20, fill="both", expand=True)
+        self.tree_prod.bind("<Button-1>", self.click_checkbox_cardapio)
         self.tree_prod.bind("<<TreeviewSelect>>", self.preencher_campos_cardapio)
 
         self.atualizar_lista_produtos()
@@ -788,7 +839,7 @@ class GestorDelivery(ctk.CTk):
 
         pop = ctk.CTkToplevel(self)
         pop.title("Edição em Massa")
-        pop.geometry("400x350")
+        pop.geometry("400x420")
         pop.grab_set()
         pop.attributes("-topmost", True)
 
@@ -805,9 +856,15 @@ class GestorDelivery(ctk.CTk):
         ent_preco = ctk.CTkEntry(main_f)
         ent_preco.pack(fill="x", pady=5)
 
+        ctk.CTkLabel(main_f, text="Visibilidade no Cardápio Web:", font=Theme.FONT_LABEL).pack(anchor="w", pady=(10, 0))
+        cb_visivel = ctk.CTkComboBox(main_f, values=["Manter", "Visível", "Oculto"])
+        cb_visivel.pack(fill="x", pady=5)
+        cb_visivel.set("Manter")
+
         def aplicar_massa():
             nova_cat = ent_cat.get().strip()
             novo_preco = ent_preco.get().strip().replace(",", ".")
+            nova_vis = cb_visivel.get()
             
             updates = []
             params = []
@@ -827,13 +884,20 @@ class GestorDelivery(ctk.CTk):
                 except ValueError:
                     messagebox.showerror("Erro", "Preço inválido!")
                     return
+                    
+            if nova_vis == "Visível":
+                updates.append("visivel_web = ?")
+                params.append(1)
+            elif nova_vis == "Oculto":
+                updates.append("visivel_web = ?")
+                params.append(0)
 
             if not updates:
                 pop.destroy()
                 return
 
             for item_id in selecionados:
-                id_prod = self.tree_prod.item(item_id)['values'][0]
+                id_prod = self.tree_prod.item(item_id)['values'][1]
                 self.cursor.execute(f"UPDATE produtos SET {', '.join(updates)} WHERE id_produto = ?", params + [id_prod])
             
             self.db.commit()
@@ -991,7 +1055,7 @@ class GestorDelivery(ctk.CTk):
             
         for i, linha in enumerate(self.cursor.fetchall()):
             tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-            self.tree_prod.insert("", "end", values=(linha[0], linha[1], linha[2] if linha[2] else "-", f"{linha[3]:.2f}"), tags=(tag,))
+            self.tree_prod.insert("", "end", values=("[ ]", linha[0], linha[1], linha[2] if linha[2] else "-", f"{linha[3]:.2f}"), tags=(tag,))
         
         self.atualizar_lista_categorias()
 
@@ -1000,12 +1064,34 @@ class GestorDelivery(ctk.CTk):
 
     def preencher_campos_cardapio(self, event):
         item_sel = self.tree_prod.selection()
+        
+        # Sincronização visual dos checkboxes
+        for item in self.tree_prod.get_children():
+            v = list(self.tree_prod.item(item, 'values'))
+            novo_estado = "[X]" if item in item_sel else "[ ]"
+            if v and v[0] != novo_estado:
+                v[0] = novo_estado
+                self.tree_prod.item(item, values=v)
+
         if item_sel:
-            id_p = self.tree_prod.item(item_sel[0])['values'][0]
+            id_p = self.tree_prod.item(item_sel[-1])['values'][1]
             self.cursor.execute("SELECT id_produto, nome, categoria, preco, ingredientes, visivel_web FROM produtos WHERE id_produto = ?", (id_p,))
             res = self.cursor.fetchone()
             if res:
                 self.preencher_campos_com_dados(res)
+
+    def click_checkbox_cardapio(self, event):
+        region = self.tree_prod.identify("region", event.x, event.y)
+        if region == "cell":
+            col = self.tree_prod.identify_column(event.x)
+            if col == '#1':
+                item = self.tree_prod.identify_row(event.y)
+                if item:
+                    if item in self.tree_prod.selection():
+                        self.tree_prod.selection_remove(item)
+                    else:
+                        self.tree_prod.selection_add(item)
+                    return "break"
 
     def preencher_campos_com_dados(self, dados):
         self.limpar_campos_cardapio()
@@ -1527,7 +1613,7 @@ class GestorDelivery(ctk.CTk):
     def atualizar_total(self):
         total_geral = 0.0
         for item in self.tree.get_children():
-            valor_str = self.tree.item(item)['values'][4].replace("R$ ", "")
+            valor_str = str(self.tree.item(item)['values'][4]).replace("R$ ", "").replace(",", ".")
             total_geral += float(valor_str)
         self.lbl_total.configure(text=f"TOTAL: R$ {total_geral:.2f}")
         return total_geral
@@ -1581,8 +1667,12 @@ class GestorDelivery(ctk.CTk):
 
         def atualizar_calculo_popup(e=None):
             try:
-                total = float(self.ed_sub.get()) + float(self.ed_acr.get()) + float(self.ed_tax.get()) - float(self.ed_des.get())
-                recebido = float(self.ed_recebido.get())
+                sub = float(self.ed_sub.get().replace(",", "."))
+                acr = float(self.ed_acr.get().replace(",", "."))
+                tax = float(self.ed_tax.get().replace(",", "."))
+                des = float(self.ed_des.get().replace(",", "."))
+                total = sub + acr + tax - des
+                recebido = float(self.ed_recebido.get().replace(",", "."))
                 self.lbl_final.configure(text=f"TOTAL: R$ {total:.2f} | Troco: R$ {max(0, recebido-total):.2f}")
             except: pass
 
@@ -1920,7 +2010,7 @@ class GestorDelivery(ctk.CTk):
         ]
 
         switches, segs = {}, {}
-        tam_opts = ["Padrão", "Alt. Dupla", "Larg. Dupla", "Grande", "Extra"]
+        tam_opts = ["Tamanho 1", "Tamanho 2", "Tamanho 3", "Tamanho 4", "Tamanho 5"]
 
         for label, key, vis, tam in sections:
             frame = ctk.CTkFrame(f_ajustes, fg_color="transparent")
@@ -1932,7 +2022,8 @@ class GestorDelivery(ctk.CTk):
             switches[key] = sw
 
             sg = ctk.CTkSegmentedButton(frame, values=tam_opts)
-            sg.set(tam_opts[tam])
+            val_idx = tam if 0 <= tam < len(tam_opts) else 0
+            sg.set(tam_opts[val_idx])
             sg.pack(fill="x", padx=10, pady=5)
             segs[key] = sg
 
@@ -1959,7 +2050,7 @@ class GestorDelivery(ctk.CTk):
         ctk.CTkButton(f_botoes, text="APLICAR E SALVAR", fg_color=Theme.SUCCESS, command=aplicar_ajustes).pack(side="left", padx=10, expand=True)
 
     def imprimir_pagina_teste(self, ed_largura, switches, segs):
-        m = {"Padrão": 0, "Alt. Dupla": 1, "Larg. Dupla": 2, "Grande": 3, "Extra": 4}
+        m = {"Tamanho 1": 0, "Tamanho 2": 1, "Tamanho 3": 2, "Tamanho 4": 3, "Tamanho 5": 4}
         try: l = int(ed_largura.get())
         except: l = 80
         
