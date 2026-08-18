@@ -1,62 +1,40 @@
 import os
 import sys
 import socket
-from typing import Union
 
-# Constantes
-DEFAULT_IP = "127.0.0.1"
-GOOGLE_DNS = ("8.8.8.8", 80)
-DEFAULT_CURRENCY_FORMAT = "R$ 0,00"
-SOCKET_TIMEOUT = 2
-
-
-def resource_path(relative_path: str) -> str:
-    """
-    Retorna o caminho absoluto para recursos, lidando com empacotamento PyInstaller.
-    
-    Args:
-        relative_path: Caminho relativo do recurso
-        
-    Returns:
-        Caminho absoluto completo do recurso
-    """
+def resource_path(relative_path):
+    """ Retorna o caminho absoluto para recursos, lidando com o empacotamento do PyInstaller. """
     try:
         base_path = sys._MEIPASS
-    except AttributeError:
+    except Exception:
         base_path = os.path.abspath(".")
     return os.path.join(base_path, relative_path)
 
-
-def obter_ip_local() -> str:
-    """
-    Retorna o IP da máquina na rede local para o servidor Flask.
-    
-    Returns:
-        IP local em formato string, ou IP padrão (127.0.0.1) se falhar
-    """
+def obter_ip_local():
+    """ Retorna o IP da máquina na rede local para o servidor Flask. """
     try:
-        socket_conn = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        socket_conn.settimeout(SOCKET_TIMEOUT)
-        socket_conn.connect(GOOGLE_DNS)
-        ip = socket_conn.getsockname()[0]
-        socket_conn.close()
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
         return ip
-    except (socket.error, OSError, IndexError):
-        return DEFAULT_IP
+    except:
+        return "127.0.0.1"
 
-
-def format_currency(value: Union[float, int, str]) -> str:
-    """
-    Formata valor monetário para o padrão brasileiro (R$).
-    
-    Args:
-        value: Valor a formatar (float, int ou string)
-        
-    Returns:
-        String formatada como "R$ X,XX" ou "R$ 0,00" se inválido
-    """
+def obter_ip_ipv6():
+    """ Retorna o IP IPv6 da máquina para acesso externo (se disponível). """
     try:
-        numeric_value = float(value)
-        return f"R$ {numeric_value:.2f}"
-    except (ValueError, TypeError):
-        return DEFAULT_CURRENCY_FORMAT
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        s.connect(("2001:4860:4860::8888", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return None
+
+def format_currency(value):
+    """ Helper para formatar valores monetários. """
+    try:
+        return f"R$ {float(value):.2f}"
+    except:
+        return "R$ 0,00"

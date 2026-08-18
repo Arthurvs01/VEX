@@ -2,11 +2,9 @@ Comandas/
 assets/
 build/
 __pycache__/
-venv/
+dist/*/
+.venv/
 
 *.db
 *.pdf
-*.spec
 *.png
-*.iss
-VEX.code-workspace

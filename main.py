@@ -5,10 +5,10 @@ import sys
 import os
 import shutil
 import textwrap
+import time
 import sqlite3
 import threading
 from datetime import datetime
-from pathlib import Path
 import ctypes
 from PIL import Image, ImageDraw, ImageOps
 
@@ -21,24 +21,9 @@ except ImportError:
 # Módulos Customizados
 from styles import Theme, configurar_estilos_ttk
 from database import DatabaseManager
-from utils import resource_path, obter_ip_local, format_currency
+from utils import resource_path, obter_ip_local, format_currency, obter_ip_ipv6
 from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
-from server import criar_app_vex
-from ui_helpers import create_tooltip, styled_nav_button
-from constants import (
-    APP_NAME, APP_TITLE_LOADING, WINDOWS_APP_ID, WINDOW_SCALE_FACTOR,
-    DEFAULT_COMPANY_NAME, DEFAULT_COMPANY_PHONE, DEFAULT_COMPANY_ADDRESS,
-    DEFAULT_NUM_VIAS, DEFAULT_NUMBERING_TYPE, DEFAULT_HISTORY_TYPE,
-    DEFAULT_PAPER_WIDTH, DEFAULT_HEADER_SIZE, DEFAULT_ORDER_SIZE,
-    DEFAULT_ADDRESS_SIZE, DEFAULT_ITEMS_SIZE, DEFAULT_VALUES_SIZE,
-    DEFAULT_PAYMENT_SIZE, DEFAULT_PRINT_VISIBILITY, DEFAULT_SHORTCUTS,
-    APPDATA_FOLDER, DATABASE_FILENAME, SIDEBAR_EXPANDED,
-    BLOCK_UNKNOWN_NEIGHBORHOOD, DEFAULT_DELIVERY_FEE, 
-    DEFAULT_WEBAPP_MENU_ENABLED, DEFAULT_WEBAPP_ADMIN_ENABLED,
-    DEFERRED_INIT_DELAY, WEB_SERVER_PORT, WEB_SERVER_HOST, WEB_SERVER_DEBUG,
-    ORDER_TYPE_DELIVERY, ORDER_TYPE_PICKUP, NAVIGATION_BINDING_KEYS,
-    MODIFIER_KEYS
-)
+from server import criar_app_cardapio
 
 # Biblioteca para Calendário
 try:
@@ -47,18 +32,31 @@ except ImportError:
     DateEntry = None
 ctk.set_appearance_mode("light")
 
+# Estilização global para botões mais arredondados e harmônicos
+_old_btn_init = ctk.CTkButton.__init__
+def _new_btn_init(self, *args, **kwargs):
+    kwargs.setdefault('corner_radius', 6)
+    kwargs.setdefault('border_width', 0)
+    if 'font' not in kwargs:
+        kwargs['font'] = ("Segoe UI", 12, "bold")
+    _old_btn_init(self, *args, **kwargs)
+ctk.CTkButton.__init__ = _new_btn_init
+
 class GestorDelivery(ctk.CTk):
-    """
-    Aplicação principal para gestão de comandas de delivery.
-    Gerencia interface gráfica, pedidos, impressão e servidor web.
-    """
-    
+    # Cache do path base para evitar recálculos constantes
+    _base_path = getattr(sys, '_MEIPASS', os.path.abspath("."))
+
+    def resource_path(self, relative_path):
+        """ Retorna o caminho absoluto para recursos, funcionando em modo dev e após compilar """
+        return os.path.join(self._base_path, relative_path)
+
     def __init__(self):
         super().__init__()
 
         # Configuração para exibir o ícone corretamente na barra de tarefas do Windows
         try:
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(WINDOWS_APP_ID)
+            myappid = 'vex.gestor.comandas.v1' # Identificador único arbitrário
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
         except Exception:
             pass
 
@@ -67,82 +65,82 @@ class GestorDelivery(ctk.CTk):
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
         
-        self.sidebar_expandido = SIDEBAR_EXPANDED
+        self.sidebar_expandido = True
         self.logo_path = None
-        self.taxa_atual = DEFAULT_DELIVERY_FEE
+        self.taxa_atual = 0.0
+        # Utilidades (IPs)
         self.ip_local = obter_ip_local()
+        self.ip_ipv6 = obter_ip_ipv6()
         self.url_publica = None
-        self.tipo_numeracao = DEFAULT_NUMBERING_TYPE
-        self.tipo_historico_atual = DEFAULT_HISTORY_TYPE
-        self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', APPDATA_FOLDER)
+        self.tipo_numeracao = "SEQUENCIAL"
+        self.tipo_historico_atual = "ENTREGA"
+        self.app_data_base_path = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'VEXGestor')
         self.db = None
-        self.impressora_selecionada = None
-        self.bloquear_bairro_desconhecido = BLOCK_UNKNOWN_NEIGHBORHOOD
+        self.impressora_selecionada = None # Armazena a impressora configurada
+        self.bloquear_bairro_desconhecido = True
 
         # Configurações de Impressão: Visibilidade de Seções
-        self.vis_cabecalho = DEFAULT_PRINT_VISIBILITY['header']
-        self.vis_pedido = DEFAULT_PRINT_VISIBILITY['order']
-        self.vis_cliente = DEFAULT_PRINT_VISIBILITY['client']
-        self.vis_itens = DEFAULT_PRINT_VISIBILITY['items']
-        self.vis_totais = DEFAULT_PRINT_VISIBILITY['totals']
-        self.vis_pagamento = DEFAULT_PRINT_VISIBILITY['payment']
+        self.vis_cabecalho = True
+        self.vis_pedido = True
+        self.vis_cliente = True
+        self.vis_itens = True
+        self.vis_totais = True
+        self.vis_pagamento = True
 
-        # WebApp Configs
-        self.webapp_menu_enabled = DEFAULT_WEBAPP_MENU_ENABLED
-        self.webapp_admin_enabled = DEFAULT_WEBAPP_ADMIN_ENABLED
-
-        # Atalhos de Teclado
-        self.atalhos_default = DEFAULT_SHORTCUTS.copy()
-        self.atalhos_usuario = {}
-        self.atalhos_binds = []
+        # --- CONFIGURAÇÃO DE ATALHOS PADRÃO ---
+        self.atalhos_default = {
+            "Delivery": {"Finalizar": "F1", "Consulta": "F5", "Limpar": "F6", "Editar Item": "F2", "Excluir Item": "Delete"},
+            "Histórico": {"Visualizar": "F1", "Editar": "F2", "Reimprimir": "F3", "Excluir": "Delete"},
+            "Cardápio": {"Salvar": "F2", "Limpar": "F3", "Excluir": "Delete"}
+        }
+        self.atalhos_usuario = {} # Carregado do Banco
+        self.atalhos_binds = []   # Armazena os binds ativos para limpeza
         
         # Configurações Padrão
-        self.nome_empresa = DEFAULT_COMPANY_NAME
-        self.fone_empresa = DEFAULT_COMPANY_PHONE
-        self.end_empresa = DEFAULT_COMPANY_ADDRESS
-        self.num_vias = DEFAULT_NUM_VIAS
+        self.nome_empresa = "MINHA EMPRESA"
+        self.fone_empresa = "(00) 0000-0000"
+        self.end_empresa = ""
+        self.num_vias = 1
 
         # Configurações de Impressão Avançadas
-        self.largura_papel = DEFAULT_PAPER_WIDTH
-        self.tam_cabecalho = DEFAULT_HEADER_SIZE
-        self.tam_pedido = DEFAULT_ORDER_SIZE
-        self.tam_endereco = DEFAULT_ADDRESS_SIZE
-        self.tam_itens = DEFAULT_ITEMS_SIZE
-        self.tam_valores = DEFAULT_VALUES_SIZE
-        self.tam_pagamento = DEFAULT_PAYMENT_SIZE
+        self.largura_papel = 80
+        self.tam_cabecalho = 2 # Índice 2 = Médio (14pt)
+        self.tam_pedido = 0
+        self.tam_endereco = 2  # Índice 2 = Médio (10pt)
+        self.tam_itens = 2     # Índice 2 = Médio (9pt)
+        self.tam_valores = 2   # Índice 2 = Médio (9pt)
+        self.tam_pagamento = 0
 
         self.editando_id_pedido = None
-        self.title(APP_TITLE_LOADING)
+        self.title("VEX - Gestor de Comandas [Carregando...]")
 
         # Configuração de Janela: Centralizar e Iniciar Maximizada
         largura_tela = self.winfo_screenwidth()
         altura_tela = self.winfo_screenheight()
         
-        # Define o tamanho da janela como escala da tela para manter proporção
-        largura_janela = int(largura_tela * WINDOW_SCALE_FACTOR)
-        altura_janela = int(altura_tela * WINDOW_SCALE_FACTOR)
+        # Define o tamanho da janela como 80% da tela para manter a proporção (formato)
+        largura_janela = int(largura_tela * 0.8)
+        altura_janela = int(altura_tela * 0.8)
 
         pos_x = (largura_tela // 2) - (largura_janela // 2)
         pos_y = (altura_tela // 2) - (altura_janela // 2)
         
         self.geometry(f"{largura_janela}x{altura_janela}+{pos_x}+{pos_y}")
         self.after(0, lambda: self.state('zoomed'))
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Atalhos de Teclado Globais para Navegação
-        for key_binding in NAVIGATION_BINDING_KEYS:
-            self.bind(key_binding, self.navegar_teclado)
+        self.bind("<Up>", self.navegar_teclado)
+        self.bind("<Down>", self.navegar_teclado)
+        self.bind("<Left>", self.navegar_teclado)
+        self.bind("<Right>", self.navegar_teclado)
 
         # Layout Base Inicial (Sidebar aparece rápido)
-        try:
-            self.criar_sidebar()
-        except Exception as e:
-            print(f"Erro ao criar sidebar: {e}")
-        self.container = ctk.CTkFrame(self, fg_color=Theme.BG_MAIN)
+        self.criar_sidebar()
+        self.container = ctk.CTkFrame(self, fg_color="white")
         self.container.pack(side="left", fill="both", expand=True)
 
         # Inicialização diferida para não travar a abertura da janela
-        self.after(DEFERRED_INIT_DELAY, self.inicializar_sistema_deferred)
+        self.after(100, self.inicializar_sistema_deferred)
 
     def inicializar_sistema_deferred(self):
         # Define o padrão AppData, que pode ser sobrescrito pelo banco local (bootstrap)
@@ -150,57 +148,52 @@ class GestorDelivery(ctk.CTk):
         """Executa as tarefas pesadas após a UI inicial aparecer"""
         
         try:
-            bootstrap_db = Path("delivery.db")
-            if bootstrap_db.exists():
+            if os.path.exists("delivery.db"):
                 try:
-                    with sqlite3.connect(bootstrap_db) as bootstrap_conn:
-                        b_cursor = bootstrap_conn.cursor()
-                        b_cursor.execute("SELECT valor FROM config WHERE chave = 'data_dir'")
-                        res = b_cursor.fetchone()
-                        if res:
-                            self.data_dir = res[0]
-                except Exception:
-                    pass
+                    bootstrap_conn = sqlite3.connect("delivery.db")
+                    b_cursor = bootstrap_conn.cursor()
+                    b_cursor.execute("SELECT valor FROM config WHERE chave = 'data_dir'")
+                    res = b_cursor.fetchone()
+                    if res: self.data_dir = res[0]
+                    bootstrap_conn.close()
+                except: pass
 
-            self.data_dir = str(Path(self.data_dir).expanduser().resolve())
-            Path(self.data_dir).mkdir(parents=True, exist_ok=True)
+            os.makedirs(self.data_dir, exist_ok=True)
             self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
             self.db = self.db_manager.conn
             self.cursor = self.db_manager.cursor
             
             self.configurar_estilos_globais()
 
-            configs = {chave: valor for chave, valor in self.db_fetchall("SELECT chave, valor FROM config")}
+            self.cursor.execute("SELECT chave, valor FROM config")
+            configs = {chave: valor for chave, valor in self.cursor.fetchall()}
             
             self.impressora_selecionada = configs.get('impressora_selecionada')
-            self.nome_empresa = configs.get('nome_empresa', DEFAULT_COMPANY_NAME)
-            self.fone_empresa = configs.get('fone_empresa', DEFAULT_COMPANY_PHONE)
-            self.end_empresa = configs.get('end_empresa', DEFAULT_COMPANY_ADDRESS)
-            self.num_vias = int(configs.get('num_vias', DEFAULT_NUM_VIAS))
-            self.largura_papel = int(configs.get('largura_papel', DEFAULT_PAPER_WIDTH))
+            self.nome_empresa = configs.get('nome_empresa', "MINHA EMPRESA")
+            self.fone_empresa = configs.get('fone_empresa', "(00) 0000-0000")
+            self.end_empresa = configs.get('end_empresa', "")
+            self.num_vias = int(configs.get('num_vias', 1))
+            self.largura_papel = int(configs.get('largura_papel', 80))
             self.data_dir = configs.get('data_dir', self.data_dir)
-            self.bloquear_bairro_desconhecido = configs.get('bloquear_bairro', 'True') == 'True'
-            self.tipo_numeracao = configs.get('tipo_numeracao', DEFAULT_NUMBERING_TYPE)
+            self.bloquear_bairro_desconhecido = (configs.get('bloquear_bairro') == 'True')
+            self.tipo_numeracao = configs.get('tipo_numeracao', "SEQUENCIAL")
+            
+            self.tam_cabecalho = int(configs.get('tam_cabecalho', self.tam_cabecalho))
+            self.tam_pedido = int(configs.get('tam_pedido', self.tam_pedido))
+            self.tam_endereco = int(configs.get('tam_endereco', self.tam_endereco))
+            self.tam_itens = int(configs.get('tam_itens', self.tam_itens))
+            self.tam_valores = int(configs.get('tam_valores', self.tam_valores))
+            self.tam_pagamento = int(configs.get('tam_pagamento', self.tam_pagamento))
+            
+            self.vis_cabecalho = (configs.get('vis_cabecalho', str(self.vis_cabecalho)) == 'True')
+            self.vis_pedido = (configs.get('vis_pedido', str(self.vis_pedido)) == 'True')
+            self.vis_cliente = (configs.get('vis_cliente', str(self.vis_cliente)) == 'True')
+            self.vis_itens = (configs.get('vis_itens', str(self.vis_itens)) == 'True')
+            self.vis_totais = (configs.get('vis_totais', str(self.vis_totais)) == 'True')
+            self.vis_pagamento = (configs.get('vis_pagamento', str(self.vis_pagamento)) == 'True')
+
             if configs.get('logo_path') and os.path.exists(configs['logo_path']):
                 self.logo_path = configs['logo_path']
-            if hasattr(self, 'lbl_link_web'):
-                self.lbl_link_web.configure(text=f"📱 LOCAL:\nhttp://{self.ip_local}:{WEB_SERVER_PORT}")
-            
-            # Carrega configurações de layout e visibilidade da impressão
-            self.tam_cabecalho = int(configs.get('tam_cabecalho', 2))
-            self.tam_pedido = int(configs.get('tam_pedido', 0))
-            self.tam_endereco = int(configs.get('tam_endereco', 2))
-            self.tam_itens = int(configs.get('tam_itens', 2))
-            self.tam_valores = int(configs.get('tam_valores', 2))
-            self.tam_pagamento = int(configs.get('tam_pagamento', 0))
-            self.vis_cabecalho = configs.get('vis_cabecalho', 'True') == 'True'
-            self.vis_pedido = configs.get('vis_pedido', 'True') == 'True'
-            self.vis_cliente = configs.get('vis_cliente', 'True') == 'True'
-            self.vis_itens = configs.get('vis_itens', 'True') == 'True'
-            self.vis_totais = configs.get('vis_totais', 'True') == 'True'
-            self.vis_pagamento = configs.get('vis_pagamento', 'True') == 'True'
-            self.webapp_menu_enabled = configs.get('webapp_menu_enabled', 'True') == 'True'
-            self.webapp_admin_enabled = configs.get('webapp_admin_enabled', 'False') == 'True'
             
             for chave, valor in configs.items():
                 if chave.startswith("atalho_"):
@@ -212,78 +205,59 @@ class GestorDelivery(ctk.CTk):
             print(f"Erro ao conectar banco: {e}")
 
         # Inicia Servidor Web com os dados da empresa
-        self.server_info = {
+        empresa_info = {
             'nome': self.nome_empresa, 
             'fone': self.fone_empresa, 
             'end': self.end_empresa, 
             'logo_path': self.logo_path
         }
-        self.server_config = {
-            'menu_enabled': self.webapp_menu_enabled,
-            'admin_enabled': self.webapp_admin_enabled
-        }
-        app_web = criar_app_vex(self.data_dir, self.server_info, self.server_config)
-        web_server_thread = threading.Thread(
-            target=lambda: app_web.run(
-                host=WEB_SERVER_HOST,
-                port=WEB_SERVER_PORT,
-                debug=WEB_SERVER_DEBUG,
-                use_reloader=False
-            ),
-            daemon=True
-        )
-        web_server_thread.start()
+        app_web = criar_app_cardapio(self.data_dir, empresa_info)
+        
+        import socket
+        from waitress import serve
+        try:
+            # Testa se o IPv6 está disponível e funciona para bind (dual-stack)
+            s = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+            s.bind(('::', 0))
+            s.close()
+            host = '::'
+            self.rede_ativa = "IPv6/IPv4"
+        except Exception:
+            host = '0.0.0.0'
+            self.rede_ativa = "IPv4 Apenas"
+            
+        if hasattr(self, 'lbl_link_web'):
+            texto_link = f"📱 REDE: {self.rede_ativa}\nLocal: http://{self.ip_local}:5000"
+            if self.ip_ipv6:
+                texto_link += f"\nIPv6: http://[{self.ip_ipv6}]:5000"
+            self.lbl_link_web.configure(text=texto_link)
+
+        # Utiliza o Waitress, um servidor WSGI pronto para produção que lida melhor com conexões externas e rede no Windows
+        ipv6 = "2804:894:f0cb:b300:5769:f653:d49f:57b6"
+        threading.Thread(target=lambda: serve(app_web, host=ipv6, port=5000, threads=6), daemon=True).start()
 
         # Atualiza o título e entra na tela principal
-        self.title(APP_NAME)
+        self.title("VEX - Gestor de Comandas")
         self.mostrar_tela_delivery()
         if self.logo_path:
             self.atualizar_imagem_logo()
 
-    def obter_atalho(self, tela: str, funcao: str) -> str:
-        """
-        Retorna o atalho configurado para uma função em uma tela específica.
-        
-        Args:
-            tela: Nome da tela (ex: "Delivery", "Histórico")
-            funcao: Nome da função (ex: "Finalizar", "Salvar")
-            
-        Returns:
-            String com o atalho (ex: "F1") ou vazio se não configurado
-        """
+    def obter_atalho(self, tela, funcao):
+        """Retorna o atalho configurado ou o padrão"""
         return self.atalhos_usuario.get(tela, {}).get(funcao, self.atalhos_default.get(tela, {}).get(funcao, ""))
-
-    def _format_bind_key(self, tecla: str) -> str:
-        if not tecla:
-            return ""
-        tecla = tecla.strip()
-        if tecla.startswith("<") and tecla.endswith(">"):
-            return tecla
-        return f"<{tecla}>"
-
-    def db_execute(self, query: str, params=()):
-        self.cursor.execute(query, params)
-        self.db.commit()
-        return self.cursor
-
-    def db_fetchone(self, query: str, params=()):
-        self.cursor.execute(query, params)
-        return self.cursor.fetchone()
-
-    def db_fetchall(self, query: str, params=()):
-        self.cursor.execute(query, params)
-        return self.cursor.fetchall()
 
     def registrar_atalhos(self, tela):
         """Limpa binds anteriores e registra os novos da tela atual"""
         for b in self.atalhos_binds:
-            self.unbind_all(b)
+            key_to_unbind = f"<{b}>" if len(b) > 1 else b
+            self.unbind_all(key_to_unbind)
         self.atalhos_binds.clear()
 
         atalhos_tela = self.atalhos_default.get(tela, {})
         for funcao in atalhos_tela.keys():
             tecla = self.obter_atalho(tela, funcao)
             if tecla:
+                # Mapeamento de funções por tela
                 cmd = None
                 if tela == "Delivery":
                     if funcao == "Finalizar": cmd = lambda e: self.finalizar_pedido()
@@ -302,60 +276,50 @@ class GestorDelivery(ctk.CTk):
                     elif funcao == "Excluir": cmd = lambda e: self.excluir_produto_db()
 
                 if cmd:
-                    bind_key = self._format_bind_key(tecla)
+                    # Tkinter usa <Key> para letras e <F1> para funções
+                    bind_key = f"<{tecla}>" if len(tecla) > 1 else tecla
                     self.bind_all(bind_key, cmd)
-                    self.atalhos_binds.append(bind_key)
+                    self.atalhos_binds.append(tecla)
 
     def capturar_tecla_atalho(self, event, ent):
-        """
-        Captura a tecla pressionada e insere o nome no campo de configuração.
+        """Captura a tecla pressionada e insere o nome no campo de configuração"""
+        tecla = event.keysym
         
-        Args:
-            event: Evento de teclado do Tkinter
-            ent: Widget Entry para inserir a tecla capturada
-        """
-        tecla = event.keysym.upper()
-        if tecla in MODIFIER_KEYS:
+        # Ignorar teclas modificadoras sozinhas
+        if tecla in ["Shift_L", "Shift_R", "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock"]:
             return "break"
 
         ent.delete(0, 'end')
-        if tecla != "BACKSPACE":
+        # BackSpace limpa o campo, outras teclas são inseridas
+        if tecla != "BackSpace":
             ent.insert(0, tecla)
-        return "break"
+        return "break" # Impede que a tecla seja digitada normalmente
 
     def configurar_estilos_globais(self):
         configurar_estilos_ttk(ttk.Style())
 
-    def on_close(self):
-        try:
-            if hasattr(self, 'db_manager') and self.db_manager:
-                self.db_manager.fechar()
-        except Exception:
-            pass
-        self.destroy()
-
     def criar_sidebar(self):
         """Cria a barra lateral de navegação persistente (chamado apenas uma vez no __init__)"""
-        self.sidebar = ctk.CTkFrame(self, width=220, corner_radius=0, fg_color=Theme.PRIMARY)
+        self.sidebar = ctk.CTkFrame(self, width=200, corner_radius=0, fg_color=Theme.PRIMARY)
         self.sidebar.pack(side="left", fill="y")
         self.sidebar.pack_propagate(False) # Impede que o conteúdo interno mude a largura
 
         # Header da Sidebar (Menu + Logo)
         self.frame_logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
-        self.frame_logo.pack(fill="x", pady=(8, 18))
+        self.frame_logo.pack(fill="x", pady=(5, 20))
 
-        self.btn_menu = ctk.CTkButton(self.frame_logo, text="≡", width=44, height=44,
-                                      fg_color="transparent", font=Theme.FONT_H1,
-                                      hover_color=Theme.PRIMARY_HOVER, command=self.toggle_sidebar)
+        self.btn_menu = ctk.CTkButton(self.frame_logo, text="≡", width=40, height=40,
+                                      fg_color="transparent", font=("Arial", 24, "bold"),
+                                      hover_color="#a93226", command=self.toggle_sidebar)
         self.btn_menu.pack(side="top", anchor="ne", padx=10)
 
         # Espaço para o Ícone/Logo
         self.btn_logo = ctk.CTkButton(self.frame_logo, text="Logo", width=110, height=110,
                                       corner_radius=55, fg_color=Theme.PRIMARY_HOVER,
-                                      hover_color=Theme.PRIMARY_HOVER, text_color="white",
+                                      hover_color="#8e2b21", text_color="white",
                                       font=Theme.FONT_LABEL,
                                       command=self.selecionar_logo)
-        self.btn_logo.pack(pady=8)
+        self.btn_logo.pack(pady=10)
 
         if self.logo_path:
             self.atualizar_imagem_logo()
@@ -372,19 +336,22 @@ class GestorDelivery(ctk.CTk):
         
         self.nav_buttons = []
         for texto, icone, comando in self.nav_info:
-            btn = styled_nav_button(self.sidebar, texto, icone, comando, expanded=self.sidebar_expandido)
-            btn.pack(pady=6, padx=12, fill="x")
-            create_tooltip(btn, texto)
+            btn = ctk.CTkButton(self.sidebar, text=texto, fg_color="transparent", height=45,
+                                text_color="white", hover_color="#a93226",
+                                font=("Arial", 14, "bold"), anchor="w" if self.sidebar_expandido else "center",
+                                border_width=0,
+                                command=comando)
+            btn.pack(pady=10, padx=20, fill="x")
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.0.12-beta", font=Theme.FONT_NORMAL, text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.1.0-beta", font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital
-        txt_link = f"📱 LOCAL:\nhttp://{self.ip_local}:{WEB_SERVER_PORT}"
-        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=Theme.FONT_NORMAL, text_color="#f1c40f")
-        self.lbl_link_web.pack(side="bottom", pady=2)
+        txt_link = f"📱 INICIANDO REDE...\nhttp://{self.ip_local}:5000"
+        self.lbl_link_web = ctk.CTkLabel(self.sidebar, text=txt_link, font=("Segoe UI", 10, "bold"), text_color="#f1c40f")
+        self.lbl_link_web.pack(side="bottom", pady=5)
 
     def atualizar_sidebar(self, nome_ativo):
         """Atualiza a cor dos botões para indicar qual tela está ativa"""
@@ -482,6 +449,14 @@ class GestorDelivery(ctk.CTk):
         for btn, texto, icone in self.nav_buttons:
             btn.configure(text=texto if self.sidebar_expandido else icone, 
                           anchor="w" if self.sidebar_expandido else "center")
+                          
+        # Atualiza visibilidade dos textos do rodapé
+        if self.sidebar_expandido:
+            self.lbl_versao.pack(side="bottom", pady=10)
+            self.lbl_link_web.pack(side="bottom", pady=5)
+        else:
+            self.lbl_versao.pack_forget()
+            self.lbl_link_web.pack_forget()
 
     def limpar_container(self):
         """Remove todos os widgets do container principal"""
@@ -515,19 +490,22 @@ class GestorDelivery(ctk.CTk):
         self.lbl_total = ctk.CTkLabel(self.frame_total, text="TOTAL: R$ 0,00", font=("Arial", 28, "bold"), text_color=Theme.PRIMARY)
         self.lbl_total.pack(side="right", padx=20)
 
-        from ui_helpers import styled_action_button
-        self.btn_finalizar = styled_action_button(self.frame_total, f"FINALIZAR ({self.obter_atalho('Delivery', 'Finalizar')})", 
-                                                 Theme.SUCCESS, self.finalizar_pedido, "🚀")
+        self.btn_finalizar = ctk.CTkButton(self.frame_total, text=f"🚀 FINALIZAR ({self.obter_atalho('Delivery', 'Finalizar')})", 
+                                           fg_color=Theme.SUCCESS, hover_color="#219150", height=45, 
+                                           font=("Arial", 15, "bold"), command=self.finalizar_pedido)
         self.btn_finalizar.pack(side="left", padx=5)
 
-        self.btn_consultar = styled_action_button(self.frame_total, f"CONSULTA ({self.obter_atalho('Delivery', 'Consulta')})", 
-                                                 Theme.SECONDARY, self.abrir_consulta_precos, "🔍")
+        self.btn_consultar = ctk.CTkButton(self.frame_total, text=f"🔍 CONSULTA ({self.obter_atalho('Delivery', 'Consulta')})", 
+                                           fg_color="#34495e", height=45, 
+                                           font=("Arial", 15, "bold"), command=self.abrir_consulta_precos)
         self.btn_consultar.pack(side="left", padx=5)
         
-        self.btn_editar_item = styled_action_button(self.frame_total, f"EDITAR", Theme.ACCENT, self.editar_item_carrinho, "📝")
+        self.btn_editar_item = ctk.CTkButton(self.frame_total, text=f"📝 EDITAR ({self.obter_atalho('Delivery', 'Editar Item')})", 
+                                             fg_color="#2980b9", height=45, font=("Arial", 12, "bold"), command=self.editar_item_carrinho)
         self.btn_editar_item.pack(side="left", padx=5)
 
-        self.btn_excluir_item = styled_action_button(self.frame_total, f"EXCLUIR", Theme.DANGER, self.excluir_item_carrinho, "❌")
+        self.btn_excluir_item = ctk.CTkButton(self.frame_total, text=f"❌ EXCLUIR ({self.obter_atalho('Delivery', 'Excluir Item')})", 
+                                              fg_color="#e74c3c", height=45, font=("Arial", 12, "bold"), command=self.excluir_item_carrinho)
         self.btn_excluir_item.pack(side="left", padx=5)
 
         # Botão Cancelar
@@ -813,6 +791,12 @@ class GestorDelivery(ctk.CTk):
         self.btn_limpar_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"LIMPAR ({self.obter_atalho('Cardápio', 'Limpar')})", fg_color="gray", 
                                              font=("Arial", 13, "bold"), command=self.limpar_campos_cardapio)
         self.btn_limpar_prod.grid(row=0, column=2, padx=5)
+        
+        self.btn_sel_todos = ctk.CTkButton(self.frame_acoes_prod, text="☑️ SEL. TODOS", fg_color="#8e44ad", hover_color="#732d91", font=("Arial", 11, "bold"), height=25, command=lambda: [self.tree_prod.selection_add(i) for i in self.tree_prod.get_children()])
+        self.btn_sel_todos.grid(row=1, column=0, pady=(5,0), padx=5)
+
+        self.btn_desel_todos = ctk.CTkButton(self.frame_acoes_prod, text="🔲 DESMARCAR", fg_color="#7f8c8d", hover_color="#95a5a6", font=("Arial", 11, "bold"), height=25, command=lambda: self.tree_prod.selection_remove(self.tree_prod.selection()))
+        self.btn_desel_todos.grid(row=1, column=1, pady=(5,0), padx=5)
 
         self.btn_excluir_prod = ctk.CTkButton(self.frame_acoes_prod, text=f"EXCLUIR ({self.obter_atalho('Cardápio', 'Excluir')})", fg_color="#e74c3c", hover_color="#c0392b", 
                                               font=("Arial", 13, "bold"), command=self.excluir_produto_db)
@@ -824,14 +808,16 @@ class GestorDelivery(ctk.CTk):
         self.cb_filtro_cat.set("TODOS")
 
         # --- TABELA DE PRODUTOS ---
-        self.tree_prod = ttk.Treeview(self.container, columns=("ID", "Produto", "Categoria", "Preço"), 
+        self.tree_prod = ttk.Treeview(self.container, columns=("Sel", "ID", "Produto", "Categoria", "Preço"), 
                                       show="headings", selectmode="extended", style="Treeview")
+        self.tree_prod.heading("Sel", text="☑")
         self.tree_prod.heading("ID", text="ID ↕", command=lambda: self.ordenar_coluna_cardapio("ID", False))
         self.tree_prod.heading("Produto", text="Nome do Produto ↕", command=lambda: self.ordenar_coluna_cardapio("Produto", False))
         self.tree_prod.heading("Categoria", text="Categoria ↕", command=lambda: self.ordenar_coluna_cardapio("Categoria", False))
         self.tree_prod.heading("Preço", text="Preço (R$) ↕", command=lambda: self.ordenar_coluna_cardapio("Preço", False))
 
-        self.tree_prod.column("ID", width=100, anchor="center")
+        self.tree_prod.column("Sel", width=40, anchor="center")
+        self.tree_prod.column("ID", width=80, anchor="center")
         self.tree_prod.column("Produto", width=300, anchor="w")
         self.tree_prod.column("Categoria", width=150, anchor="center")
         self.tree_prod.column("Preço", width=100, anchor="center")
@@ -840,6 +826,7 @@ class GestorDelivery(ctk.CTk):
         self.tree_prod.tag_configure('evenrow', background="#f1f2f6")
 
         self.tree_prod.pack(pady=10, padx=20, fill="both", expand=True)
+        self.tree_prod.bind("<Button-1>", self.click_checkbox_cardapio)
         self.tree_prod.bind("<<TreeviewSelect>>", self.preencher_campos_cardapio)
 
         self.atualizar_lista_produtos()
@@ -852,7 +839,7 @@ class GestorDelivery(ctk.CTk):
 
         pop = ctk.CTkToplevel(self)
         pop.title("Edição em Massa")
-        pop.geometry("400x350")
+        pop.geometry("400x420")
         pop.grab_set()
         pop.attributes("-topmost", True)
 
@@ -869,9 +856,15 @@ class GestorDelivery(ctk.CTk):
         ent_preco = ctk.CTkEntry(main_f)
         ent_preco.pack(fill="x", pady=5)
 
+        ctk.CTkLabel(main_f, text="Visibilidade no Cardápio Web:", font=Theme.FONT_LABEL).pack(anchor="w", pady=(10, 0))
+        cb_visivel = ctk.CTkComboBox(main_f, values=["Manter", "Visível", "Oculto"])
+        cb_visivel.pack(fill="x", pady=5)
+        cb_visivel.set("Manter")
+
         def aplicar_massa():
             nova_cat = ent_cat.get().strip()
             novo_preco = ent_preco.get().strip().replace(",", ".")
+            nova_vis = cb_visivel.get()
             
             updates = []
             params = []
@@ -891,13 +884,20 @@ class GestorDelivery(ctk.CTk):
                 except ValueError:
                     messagebox.showerror("Erro", "Preço inválido!")
                     return
+                    
+            if nova_vis == "Visível":
+                updates.append("visivel_web = ?")
+                params.append(1)
+            elif nova_vis == "Oculto":
+                updates.append("visivel_web = ?")
+                params.append(0)
 
             if not updates:
                 pop.destroy()
                 return
 
             for item_id in selecionados:
-                id_prod = self.tree_prod.item(item_id)['values'][0]
+                id_prod = self.tree_prod.item(item_id)['values'][1]
                 self.cursor.execute(f"UPDATE produtos SET {', '.join(updates)} WHERE id_produto = ?", params + [id_prod])
             
             self.db.commit()
@@ -1055,7 +1055,7 @@ class GestorDelivery(ctk.CTk):
             
         for i, linha in enumerate(self.cursor.fetchall()):
             tag = 'evenrow' if i % 2 == 0 else 'oddrow'
-            self.tree_prod.insert("", "end", values=(linha[0], linha[1], linha[2] if linha[2] else "-", f"{linha[3]:.2f}"), tags=(tag,))
+            self.tree_prod.insert("", "end", values=("[ ]", linha[0], linha[1], linha[2] if linha[2] else "-", f"{linha[3]:.2f}"), tags=(tag,))
         
         self.atualizar_lista_categorias()
 
@@ -1064,12 +1064,34 @@ class GestorDelivery(ctk.CTk):
 
     def preencher_campos_cardapio(self, event):
         item_sel = self.tree_prod.selection()
+        
+        # Sincronização visual dos checkboxes
+        for item in self.tree_prod.get_children():
+            v = list(self.tree_prod.item(item, 'values'))
+            novo_estado = "[X]" if item in item_sel else "[ ]"
+            if v and v[0] != novo_estado:
+                v[0] = novo_estado
+                self.tree_prod.item(item, values=v)
+
         if item_sel:
-            id_p = self.tree_prod.item(item_sel[0])['values'][0]
+            id_p = self.tree_prod.item(item_sel[-1])['values'][1]
             self.cursor.execute("SELECT id_produto, nome, categoria, preco, ingredientes, visivel_web FROM produtos WHERE id_produto = ?", (id_p,))
             res = self.cursor.fetchone()
             if res:
                 self.preencher_campos_com_dados(res)
+
+    def click_checkbox_cardapio(self, event):
+        region = self.tree_prod.identify("region", event.x, event.y)
+        if region == "cell":
+            col = self.tree_prod.identify_column(event.x)
+            if col == '#1':
+                item = self.tree_prod.identify_row(event.y)
+                if item:
+                    if item in self.tree_prod.selection():
+                        self.tree_prod.selection_remove(item)
+                    else:
+                        self.tree_prod.selection_add(item)
+                    return "break"
 
     def preencher_campos_com_dados(self, dados):
         self.limpar_campos_cardapio()
@@ -1591,7 +1613,7 @@ class GestorDelivery(ctk.CTk):
     def atualizar_total(self):
         total_geral = 0.0
         for item in self.tree.get_children():
-            valor_str = self.tree.item(item)['values'][4].replace("R$ ", "")
+            valor_str = str(self.tree.item(item)['values'][4]).replace("R$ ", "").replace(",", ".")
             total_geral += float(valor_str)
         self.lbl_total.configure(text=f"TOTAL: R$ {total_geral:.2f}")
         return total_geral
@@ -1645,9 +1667,12 @@ class GestorDelivery(ctk.CTk):
 
         def atualizar_calculo_popup(e=None):
             try:
-                def f(v): return float(v.replace(",", ".")) if v.strip() else 0.0
-                total = f(self.ed_sub.get()) + f(self.ed_acr.get()) + f(self.ed_tax.get()) - f(self.ed_des.get())
-                recebido = f(self.ed_recebido.get())
+                sub = float(self.ed_sub.get().replace(",", "."))
+                acr = float(self.ed_acr.get().replace(",", "."))
+                tax = float(self.ed_tax.get().replace(",", "."))
+                des = float(self.ed_des.get().replace(",", "."))
+                total = sub + acr + tax - des
+                recebido = float(self.ed_recebido.get().replace(",", "."))
                 self.lbl_final.configure(text=f"TOTAL: R$ {total:.2f} | Troco: R$ {max(0, recebido-total):.2f}")
             except: pass
 
@@ -1849,21 +1874,6 @@ class GestorDelivery(ctk.CTk):
                                  variable=self.var_tipo_num, value="PREENCHER")
         rb2.grid(row=2, column=0, sticky="w", padx=15, pady=10)
 
-        # --- SEÇÃO 1.3: ACESSO WEB ---
-        frame_web = self.criar_card_container("🌐 ACESSO WEB E MOBILE", parent=self.scroll_config)
-        
-        self.var_menu_web = tk.BooleanVar(value=self.webapp_menu_enabled)
-        ctk.CTkSwitch(frame_web, text="Habilitar Cardápio Digital (Clientes)", 
-                      variable=self.var_menu_web).grid(row=1, column=0, padx=15, pady=5, sticky="w")
-        
-        self.var_admin_web = tk.BooleanVar(value=self.webapp_admin_enabled)
-        ctk.CTkSwitch(frame_web, text="Habilitar Painel Administrativo Web (Operador)", 
-                      variable=self.var_admin_web).grid(row=2, column=0, padx=15, pady=5, sticky="w")
-        
-        links = f"Cardápio: http://{self.ip_local}:{WEB_SERVER_PORT}\n"
-        links += f"Painel Admin: http://{self.ip_local}:{WEB_SERVER_PORT}/admin"
-        ctk.CTkLabel(frame_web, text=links, font=("Consolas", 10), text_color=Theme.ACCENT, justify="left").grid(row=3, column=0, padx=15, pady=10, sticky="w")
-
         # --- SEÇÃO 2: CONFIGURAÇÕES DE IMPRESSÃO ---
         frame_print = self.criar_card_container("🖨️ CONFIGURAÇÕES DE IMPRESSÃO", parent=self.scroll_config)
         frame_print.grid_columnconfigure(1, weight=1)
@@ -2000,7 +2010,7 @@ class GestorDelivery(ctk.CTk):
         ]
 
         switches, segs = {}, {}
-        tam_opts = ["Padrão", "Alt. Dupla", "Larg. Dupla", "Grande", "Extra"]
+        tam_opts = ["Tamanho 1", "Tamanho 2", "Tamanho 3", "Tamanho 4", "Tamanho 5"]
 
         for label, key, vis, tam in sections:
             frame = ctk.CTkFrame(f_ajustes, fg_color="transparent")
@@ -2012,7 +2022,8 @@ class GestorDelivery(ctk.CTk):
             switches[key] = sw
 
             sg = ctk.CTkSegmentedButton(frame, values=tam_opts)
-            sg.set(tam_opts[tam])
+            val_idx = tam if 0 <= tam < len(tam_opts) else 0
+            sg.set(tam_opts[val_idx])
             sg.pack(fill="x", padx=10, pady=5)
             segs[key] = sg
 
@@ -2039,7 +2050,7 @@ class GestorDelivery(ctk.CTk):
         ctk.CTkButton(f_botoes, text="APLICAR E SALVAR", fg_color=Theme.SUCCESS, command=aplicar_ajustes).pack(side="left", padx=10, expand=True)
 
     def imprimir_pagina_teste(self, ed_largura, switches, segs):
-        m = {"Padrão": 0, "Alt. Dupla": 1, "Larg. Dupla": 2, "Grande": 3, "Extra": 4}
+        m = {"Tamanho 1": 0, "Tamanho 2": 1, "Tamanho 3": 2, "Tamanho 4": 3, "Tamanho 5": 4}
         try: l = int(ed_largura.get())
         except: l = 80
         
@@ -2072,11 +2083,14 @@ class GestorDelivery(ctk.CTk):
         new_data_dir = self.ent_data_dir.get()
 
         data_dir_changed = (old_data_dir != new_data_dir)
-        escolha = None
+        mover = False
         if data_dir_changed:
-            escolha = self.pedir_escolha_migracao(old_data_dir, new_data_dir)
-            if escolha == "CANCELAR":
-                return
+            mover = messagebox.askyesno("Mudar Pasta de Dados", 
+                                        f"Deseja mover os arquivos de dados existentes para a nova pasta?\n\n"
+                                        f"De: {old_data_dir}\n"
+                                        f"Para: {new_data_dir}\n\n"
+                                        "Sim: Move o banco de dados e imagens atuais.\n"
+                                        "Não: Cria um novo banco de dados vazio na nova pasta.")
 
         try:
             configs = {
@@ -2101,8 +2115,6 @@ class GestorDelivery(ctk.CTk):
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
                 'data_dir': new_data_dir,
                 'tipo_numeracao': self.var_tipo_num.get(),
-                'webapp_menu_enabled': str(self.var_menu_web.get()),
-                'webapp_admin_enabled': str(self.var_admin_web.get()),
             }
             
             # Salvar Atalhos e Validar duplicatas na mesma tela
@@ -2131,7 +2143,7 @@ class GestorDelivery(ctk.CTk):
                     self.db.close()
                     self.db = None
                 
-                if escolha == "MOVER":
+                if mover:
                     try:
                         os.makedirs(new_data_dir, exist_ok=True)
                         # Migração do Banco de Dados
@@ -2162,17 +2174,11 @@ class GestorDelivery(ctk.CTk):
                 # Atualiza a variável de diretório e reconecta
                 self.data_dir = new_data_dir
                 os.makedirs(self.data_dir, exist_ok=True)
-                
-                if escolha == "NOVO":
-                    db_destino = os.path.join(self.data_dir, "delivery.db")
-                    if os.path.exists(db_destino):
-                        try: os.remove(db_destino)
-                        except: pass
+                self.db = sqlite3.connect(os.path.join(self.data_dir, "delivery.db"), check_same_thread=False)
+                self.cursor = self.db.cursor()
 
-                # Inicializa DatabaseManager (que já cria tabelas e aplica migrações)
-                self.db_manager = DatabaseManager(os.path.join(self.data_dir, "delivery.db"))
-                self.db = self.db_manager.conn
-                self.cursor = self.db_manager.cursor
+                if not mover:
+                    self.criar_tabelas() # Cria estrutura se for banco novo
                 
                 # Persiste as configurações atuais no novo banco de dados
                 for chave, valor in configs.items():
@@ -2188,21 +2194,6 @@ class GestorDelivery(ctk.CTk):
             self.impressora_selecionada = None if configs['impressora_selecionada'] == "Nenhuma" else configs['impressora_selecionada']
             self.bloquear_bairro_desconhecido = (configs['bloquear_bairro'] == 'True')
             self.tipo_numeracao = configs['tipo_numeracao']
-            self.webapp_menu_enabled = self.var_menu_web.get()
-            self.webapp_admin_enabled = self.var_admin_web.get()
-
-            # Atualiza os dicionários do servidor web em tempo real
-            if hasattr(self, 'server_config'):
-                self.server_config['menu_enabled'] = self.webapp_menu_enabled
-                self.server_config['admin_enabled'] = self.webapp_admin_enabled
-            
-            if hasattr(self, 'server_info'):
-                self.server_info.update({
-                    'nome': self.nome_empresa,
-                    'fone': self.fone_empresa,
-                    'end': self.end_empresa,
-                    'logo_path': self.logo_path
-                })
 
             # Atualiza o dicionário de atalhos em memória
             for k, v in configs.items():
@@ -2210,7 +2201,7 @@ class GestorDelivery(ctk.CTk):
                     p = k.split("_")
                     self.atalhos_usuario.setdefault(p[1], {})[p[2]] = v
             
-            messagebox.showinfo("Sucesso", "Configurações aplicadas! Reinicie para surtir efeito total no servidor.")
+            messagebox.showinfo("Sucesso", "Configurações aplicadas!")
         except Exception as e:
             messagebox.showerror("Erro", f"Erro ao salvar: {e}")
 
@@ -2235,49 +2226,6 @@ class GestorDelivery(ctk.CTk):
         new_dir = filedialog.askdirectory(initialdir=self.data_dir)
         if new_dir:
             self.ent_data_dir.configure(state="normal"); self.ent_data_dir.delete(0, 'end'); self.ent_data_dir.insert(0, new_dir); self.ent_data_dir.configure(state="readonly")
-
-    def pedir_escolha_migracao(self, old_dir, new_dir):
-        """Exibe diálogo customizado para escolha de migração de dados."""
-        res = {"val": "CANCELAR"}
-        
-        pop = ctk.CTkToplevel(self)
-        pop.title("Configuração de Dados")
-        pop.geometry("480x420")
-        pop.grab_set()
-        pop.attributes("-topmost", True)
-        
-        # Centralizar popup
-        pop.update_idletasks()
-        x = (pop.winfo_screenwidth() // 2) - (480 // 2)
-        y = (pop.winfo_screenheight() // 2) - (420 // 2)
-        pop.geometry(f"+{x}+{y}")
-
-        main_f = ctk.CTkFrame(pop, fg_color="white")
-        main_f.pack(fill="both", expand=True, padx=20, pady=20)
-
-        ctk.CTkLabel(main_f, text="MUDANÇA DE PASTA DE DADOS", font=("Arial", 16, "bold"), text_color=Theme.PRIMARY).pack(pady=10)
-        
-        info = f"Origem: {old_dir}\nDestino: {new_dir}\n\nO que deseja fazer com as informações do sistema?"
-        ctk.CTkLabel(main_f, text=info, font=("Arial", 11), justify="left", wraplength=400).pack(pady=10)
-
-        def definir_escolha(v):
-            res["val"] = v
-            pop.destroy()
-
-        ctk.CTkButton(main_f, text="Mover Banco de Dados Atual", height=45, fg_color=Theme.PRIMARY, 
-                      command=lambda: definir_escolha("MOVER")).pack(fill="x", pady=5)
-        
-        ctk.CTkButton(main_f, text="Manter Banco de Dados Existente", height=45, fg_color="#34495e", 
-                      command=lambda: definir_escolha("MANTER")).pack(fill="x", pady=5)
-        
-        ctk.CTkButton(main_f, text="Criar Novo Banco de Dados", height=45, fg_color="#e74c3c", 
-                      command=lambda: definir_escolha("NOVO")).pack(fill="x", pady=5)
-
-        ctk.CTkButton(main_f, text="Cancelar", height=35, fg_color="gray", 
-                      command=lambda: definir_escolha("CANCELAR")).pack(fill="x", pady=(15, 0))
-
-        self.wait_window(pop)
-        return res["val"]
 
 if __name__ == "__main__":
     app = GestorDelivery()
