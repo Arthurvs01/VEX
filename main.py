@@ -233,8 +233,7 @@ class GestorDelivery(ctk.CTk):
             self.lbl_link_web.configure(text=texto_link)
 
         # Utiliza o Waitress, um servidor WSGI pronto para produção que lida melhor com conexões externas e rede no Windows
-        ipv6 = "2804:894:f0cb:b300:5769:f653:d49f:57b6"
-        threading.Thread(target=lambda: serve(app_web, host=ipv6, port=5000, threads=6), daemon=True).start()
+        threading.Thread(target=lambda: serve(app_web, host=host, port=5000, threads=6), daemon=True).start()
 
         # Atualiza o título e entra na tela principal
         self.title("VEX - Gestor de Comandas")

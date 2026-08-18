@@ -8,3 +8,6 @@ dist/*/
 *.db
 *.pdf
 *.png
+*.iss
+*.spec
+*.bat
