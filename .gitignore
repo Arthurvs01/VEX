@@ -4,10 +4,9 @@ build/
 __pycache__/
 dist/*/
 .venv/
+.vscode/
 
 *.db
 *.pdf
 *.png
 *.iss
-*.spec
-*.bat

@@ -28,6 +28,7 @@ a = Analysis(
 
         # Flask
         'flask',
+        'waitress',
 
         # pywin32
         'win32print',

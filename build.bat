@@ -57,9 +57,9 @@ echo BUILD CONCLUIDO COM SUCESSO
 echo ==========================================
 echo.
 echo ONEDIR:
-echo dist\Vex - Gestor de Pedidos - 1.0.9-beta\
+echo dist\Vex - Gestor de Pedidos\
 echo.
 echo ONEFILE:
-echo dist\Vex - Gestor de Pedidos - 1.0.9-beta.exe
+echo dist\Vex - Gestor de Pedidos.exe
 echo.
 pause

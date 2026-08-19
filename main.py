@@ -25,6 +25,9 @@ from utils import resource_path, obter_ip_local, format_currency, obter_ip_ipv6
 from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
 from server import criar_app_cardapio
 
+# Versão do Sistema
+versao = "v1.1.1-beta"
+
 # Biblioteca para Calendário
 try:
     from tkcalendar import DateEntry
@@ -344,7 +347,7 @@ class GestorDelivery(ctk.CTk):
             self.nav_buttons.append((btn, texto, icone))
 
         # Rodapé da Sidebar com Versão
-        self.lbl_versao = ctk.CTkLabel(self.sidebar, text="v1.1.0-beta", font=("Arial", 10), text_color="#ecf0f1")
+        self.lbl_versao = ctk.CTkLabel(self.sidebar, text=versao, font=("Arial", 10), text_color="#ecf0f1")
         self.lbl_versao.pack(side="bottom", pady=10)
 
         # Link do Cardápio Digital

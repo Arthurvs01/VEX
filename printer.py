@@ -45,7 +45,7 @@ class PrinterManager:
             LEFT = b'\x1ba\x00'
             BOLD_ON = b'\x1bE\x01'
             BOLD_OFF = b'\x1bE\x00'
-            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x11', b'\x1d!\x22', b'\x1d!\x33', b'\x1d!\x44']
+            TAM_MAP = [b'\x1d!\x00', b'\x1d!\x01', b'\x1d!\x11', b'\x1d!\x21', b'\x1d!\x22']
             # Comando ESC t n: Seleciona tabela de caracteres (n=2 é CP850)
             SET_CP850 = b'\x1bt\x02'
             
