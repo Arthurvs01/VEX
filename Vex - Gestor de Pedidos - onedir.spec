@@ -1,9 +1,20 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import os
+import sys
+
+# Mapeia dinamicamente as DLLs do pywin32 do ambiente virtual em uso
+venv_path = os.path.dirname(os.path.dirname(sys.executable))
+pywin32_dlls = os.path.join(venv_path, 'Lib', 'site-packages', 'pywin32_system32')
+
+binaries_list = []
+if os.path.exists(pywin32_dlls):
+    binaries_list.append((os.path.join(pywin32_dlls, '*.dll'), '.'))
+
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=[],
+    binaries=binaries_list,
     datas=[('Icon.ico', '.')],
     hiddenimports=[
         # CustomTkinter
@@ -30,9 +41,12 @@ a = Analysis(
         'flask',
         'waitress',
 
-        # pywin32
+        # pywin32 completos para suporte a impressão e win32com
         'win32print',
         'win32api',
+        'win32com',
+        'win32gui',
+        'win32con',
 
         # Módulos do próprio VEX
         'styles',
@@ -68,6 +82,7 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon=['Icon.ico'],
+    uac_admin=True,  # Solcita elevação de Administrador para I/O de impressão
 )
 
 coll = COLLECT(
