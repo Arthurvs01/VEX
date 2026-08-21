@@ -26,7 +26,7 @@ from printer import PrinterManager, WIN32_PRINTER_AVAILABLE
 from server import criar_app_cardapio
 
 # Versão do Sistema
-versao = "v1.1.1-beta"
+versao = "v1.1.2-beta"
 
 # Biblioteca para Calendário
 try:
@@ -188,12 +188,12 @@ class GestorDelivery(ctk.CTk):
             self.tam_valores = int(configs.get('tam_valores', self.tam_valores))
             self.tam_pagamento = int(configs.get('tam_pagamento', self.tam_pagamento))
             
-            self.vis_cabecalho = (configs.get('vis_cabecalho', str(self.vis_cabecalho)) == 'True')
-            self.vis_pedido = (configs.get('vis_pedido', str(self.vis_pedido)) == 'True')
-            self.vis_cliente = (configs.get('vis_cliente', str(self.vis_cliente)) == 'True')
-            self.vis_itens = (configs.get('vis_itens', str(self.vis_itens)) == 'True')
-            self.vis_totais = (configs.get('vis_totais', str(self.vis_totais)) == 'True')
-            self.vis_pagamento = (configs.get('vis_pagamento', str(self.vis_pagamento)) == 'True')
+            self.vis_cabecalho = str(configs.get('vis_cabecalho', self.vis_cabecalho)).strip().lower() in ('true', '1')
+            self.vis_pedido    = str(configs.get('vis_pedido', self.vis_pedido)).strip().lower() in ('true', '1')
+            self.vis_cliente   = str(configs.get('vis_cliente', self.vis_cliente)).strip().lower() in ('true', '1')
+            self.vis_itens     = str(configs.get('vis_itens', self.vis_itens)).strip().lower() in ('true', '1')
+            self.vis_totais    = str(configs.get('vis_totais', self.vis_totais)).strip().lower() in ('true', '1')
+            self.vis_pagamento = str(configs.get('vis_pagamento', self.vis_pagamento)).strip().lower() in ('true', '1')
 
             if configs.get('logo_path') and os.path.exists(configs['logo_path']):
                 self.logo_path = configs['logo_path']
@@ -2108,12 +2108,12 @@ class GestorDelivery(ctk.CTk):
                 'tam_itens': str(self.tam_itens),
                 'tam_valores': str(self.tam_valores),
                 'tam_pagamento': str(self.tam_pagamento),
-                'vis_cabecalho': str(self.vis_cabecalho),
-                'vis_pedido': str(self.vis_pedido),
-                'vis_cliente': str(self.vis_cliente),
-                'vis_itens': str(self.vis_itens),
-                'vis_totais': str(self.vis_totais),
-                'vis_pagamento': str(self.vis_pagamento),
+                'vis_cabecalho': str(bool(self.vis_cabecalho)),
+                'vis_pedido': str(bool(self.vis_pedido)),
+                'vis_cliente': str(bool(self.vis_cliente)),
+                'vis_itens': str(bool(self.vis_itens)),
+                'vis_totais': str(bool(self.vis_totais)),
+                'vis_pagamento': str(bool(self.vis_pagamento)),
                 'bloquear_bairro': str(self.var_bloquear_bairro.get()),
                 'data_dir': new_data_dir,
                 'tipo_numeracao': self.var_tipo_num.get(),
